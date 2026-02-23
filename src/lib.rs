@@ -1,0 +1,5 @@
+//! ripgrep-soft - A high-performance file and content search tool
+
+pub mod cli;
+pub mod error;
+pub mod logging;
