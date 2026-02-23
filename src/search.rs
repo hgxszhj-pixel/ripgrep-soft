@@ -82,8 +82,6 @@ impl Searcher {
     }
 }
 
-// Content search types
-
 pub struct ContentSearchQuery {
     pub pattern: String,
     pub case_sensitive: bool,
@@ -127,10 +125,7 @@ pub struct ContentMatch {
 pub struct ContentSearcher;
 
 impl ContentSearcher {
-    pub fn search_files(
-        query: &ContentSearchQuery,
-        paths: &[PathBuf],
-    ) -> Vec<ContentMatch> {
+    pub fn search_files(query: &ContentSearchQuery, paths: &[PathBuf]) -> Vec<ContentMatch> {
         if query.pattern.is_empty() {
             return Vec::new();
         }
@@ -156,7 +151,6 @@ impl ContentSearcher {
     }
 
     fn search_file(query: &ContentSearchQuery, path: &Path) -> Vec<ContentMatch> {
-        // Skip binary files
         if Self::is_binary_file(path) {
             return Vec::new();
         }
@@ -190,7 +184,7 @@ impl ContentSearcher {
             if let Some(matched_text) = line_matches {
                 matches.push(ContentMatch {
                     file_path: path.to_path_buf(),
-                    line_number: line_number + 1, // 1-indexed
+                    line_number: line_number + 1,
                     line_content: line,
                     matched_text,
                 });
@@ -209,12 +203,8 @@ impl ContentSearcher {
         let mut reader = BufReader::new(file);
         let mut buffer = [0u8; 8192];
 
-        // Read up to 8KB to check for binary content
         match std::io::Read::read(&mut reader, &mut buffer) {
-            Ok(n) => {
-                // Check for null bytes in the first 8KB
-                buffer[..n].iter().any(|&b| b == 0)
-            }
+            Ok(n) => buffer[..n].iter().any(|&b| b == 0),
             Err(_) => false,
         }
     }
@@ -227,13 +217,11 @@ impl ContentSearcher {
         };
 
         if search_line.contains(pattern) {
-            // Find the matched text in original line
             if case_sensitive {
                 if let Some(start) = line.find(pattern) {
                     return Some(line[start..start + pattern.len()].to_string());
                 }
             } else {
-                // For case-insensitive, find position in lowercase and extract from original
                 if let Some(start) = search_line.find(pattern) {
                     return Some(line[start..start + pattern.len()].to_string());
                 }
@@ -258,7 +246,6 @@ impl ContentSearcher {
         None
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -327,5 +314,137 @@ mod tests {
         let results = Searcher::search(&query, &index);
 
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_content_search_query_new() {
+        let query = ContentSearchQuery::new("test".to_string());
+        assert_eq!(query.pattern, "test");
+        assert!(!query.case_sensitive);
+        assert!(!query.regex);
+        assert_eq!(query.max_context, 0);
+    }
+
+    #[test]
+    fn test_content_search_query_builder() {
+        let query = ContentSearchQuery::new("test".to_string())
+            .with_case_sensitive(true)
+            .with_regex(true)
+            .with_max_context(3);
+
+        assert!(query.case_sensitive);
+        assert!(query.regex);
+        assert_eq!(query.max_context, 3);
+    }
+
+    #[test]
+    fn test_content_search_empty_pattern() {
+        let temp_dir = std::env::temp_dir();
+        let test_path = temp_dir.join("ripgrep_test_content.txt");
+        std::fs::write(&test_path, "test content here").unwrap();
+
+        let query = ContentSearchQuery::new("".to_string());
+        let results = ContentSearcher::search_files(&query, &[test_path.clone()]);
+
+        assert!(results.is_empty());
+
+        std::fs::remove_file(test_path).ok();
+    }
+
+    #[test]
+    fn test_content_search_case_insensitive() {
+        let temp_dir = std::env::temp_dir();
+        let test_path = temp_dir.join("ripgrep_test_case.txt");
+        std::fs::write(
+            &test_path,
+            "Test CONTENT here\nAnother LINE\ntest content again",
+        )
+        .unwrap();
+
+        let query = ContentSearchQuery::new("test".to_string());
+        let results = ContentSearcher::search_files(&query, &[test_path.clone()]);
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].line_number, 1);
+        assert_eq!(results[1].line_number, 3);
+
+        std::fs::remove_file(test_path).ok();
+    }
+
+    #[test]
+    fn test_content_search_case_sensitive() {
+        let temp_dir = std::env::temp_dir();
+        let test_path = temp_dir.join("ripgrep_test_sensitive.txt");
+        std::fs::write(&test_path, "Test CONTENT\ntest content").unwrap();
+
+        let query = ContentSearchQuery::new("Test".to_string()).with_case_sensitive(true);
+        let results = ContentSearcher::search_files(&query, &[test_path.clone()]);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].line_number, 1);
+
+        std::fs::remove_file(test_path).ok();
+    }
+
+    #[test]
+    fn test_content_search_regex() {
+        let temp_dir = std::env::temp_dir();
+        let test_path = temp_dir.join("ripgrep_test_regex.txt");
+        std::fs::write(&test_path, "test123 abc\ntest456 def\nother content").unwrap();
+
+        let query = ContentSearchQuery::new(r"test\d+".to_string()).with_regex(true);
+        let results = ContentSearcher::search_files(&query, &[test_path.clone()]);
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].line_number, 1);
+        assert_eq!(results[1].line_number, 2);
+
+        std::fs::remove_file(test_path).ok();
+    }
+
+    #[test]
+    fn test_content_search_line_number_tracking() {
+        let temp_dir = std::env::temp_dir();
+        let test_path = temp_dir.join("ripgrep_test_lines.txt");
+        std::fs::write(&test_path, "line 1\nline 2\nline 3 with match\nline 4").unwrap();
+
+        let query = ContentSearchQuery::new("match".to_string());
+        let results = ContentSearcher::search_files(&query, &[test_path.clone()]);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].line_number, 3);
+        assert!(results[0].line_content.contains("line 3 with match"));
+
+        std::fs::remove_file(test_path).ok();
+    }
+
+    #[test]
+    fn test_content_search_binary_detection() {
+        let temp_dir = std::env::temp_dir();
+        let test_path = temp_dir.join("ripgrep_test_binary.bin");
+
+        let binary_content: Vec<u8> = vec![0x00, 0x01, 0x02, b't', b'e', b's', b't'];
+        std::fs::write(&test_path, binary_content).unwrap();
+
+        let query = ContentSearchQuery::new("test".to_string());
+        let results = ContentSearcher::search_files(&query, &[test_path.clone()]);
+
+        assert!(results.is_empty());
+
+        std::fs::remove_file(test_path).ok();
+    }
+
+    #[test]
+    fn test_content_search_text_file() {
+        let temp_dir = std::env::temp_dir();
+        let test_path = temp_dir.join("ripgrep_test_text.txt");
+        std::fs::write(&test_path, "This is a text file\nWith some content").unwrap();
+
+        let query = ContentSearchQuery::new("text".to_string());
+        let results = ContentSearcher::search_files(&query, &[test_path.clone()]);
+
+        assert_eq!(results.len(), 1);
+
+        std::fs::remove_file(test_path).ok();
     }
 }
