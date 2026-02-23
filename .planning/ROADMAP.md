@@ -1,6 +1,6 @@
 # ROADMAP
 
-> Last activity: 2026-02-23 - Project initialized
+> Last activity: 2026-02-23 - Completed quick task 1: 用Rust开发一个类似Everything的快速文件搜索工具
 
 ## Blockers/Concerns
 
@@ -45,4 +45,5 @@
 ## Quick Tasks Completed
 
 | # | Description | Date | Commit | Status | Directory |
-|---|-------------|------|--------|--------|-----------|
+|---|-------------|------|--------|--------|---------------|
+| 1 | Core Project Setup | 2026-02-23 | - | pending | .planning/quick/1-rust-everything-ripgrep |
