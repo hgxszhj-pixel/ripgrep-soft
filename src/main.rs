@@ -1,5 +1,11 @@
 use clap::Parser;
-use ripgrep_soft::{cli::Cli, cli::Commands, logging, search::{ContentSearcher, ContentSearchQuery}};
+use ripgrep_soft::{
+    cli::Cli,
+    cli::Commands,
+    index::{FileIndex, FileEntry},
+    search::{SearchQuery, Searcher, ContentSearcher, ContentSearchQuery},
+    logging,
+};
 use std::path::PathBuf;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -48,14 +54,76 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             } else if let Some(pattern) = pattern {
                 // Filename search mode
-                println!("Filename search for '{}' not yet implemented", pattern);
+                let search_path = PathBuf::from(&path);
+                
+                // Build index from search path
+                let mut index = FileIndex::new();
+                if search_path.is_dir() {
+                    if let Err(e) = index.walk_directory(&search_path) {
+                        tracing::error!("Failed to walk directory: {}", e);
+                        println!("Error: Failed to read directory: {}", e);
+                        return Ok(());
+                    }
+                } else if search_path.is_file() {
+                    if let Some(entry) = FileEntry::from_path(&search_path) {
+                        index.add_entry(entry);
+                    }
+                }
+                
+                // Create search query
+                let query = SearchQuery::new(pattern)
+                    .with_regex(regex)
+                    .with_case_sensitive(case_sensitive);
+                
+                // Perform search
+                let results = Searcher::search(&query, &index);
+                
+                if results.is_empty() {
+                    println!("No matches found.");
+                } else {
+                    println!("Found {} matches:", results.len());
+                    for entry in results {
+                        println!("  {}", entry.path.display());
+                    }
+                }
             } else {
                 println!("Please specify either --pattern or --content for search");
             }
         }
         Commands::Index { path, rebuild } => {
             tracing::info!("Index command - path: {}, rebuild: {}", path, rebuild);
-            println!("Index functionality not yet implemented");
+            
+            let search_path = PathBuf::from(&path);
+            
+            if !search_path.exists() {
+                println!("Error: Path does not exist: {}", path);
+                return Ok(());
+            }
+            
+            println!("Building index for: {}", path);
+            
+            let mut index = FileIndex::new();
+            
+            if search_path.is_dir() {
+                match index.walk_directory(&search_path) {
+                    Ok(()) => {
+                        println!("Index built successfully!");
+                        println!("Total files indexed: {}", index.len());
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to build index: {}", e);
+                        println!("Error: Failed to build index: {}", e);
+                    }
+                }
+            } else {
+                if let Some(entry) = FileEntry::from_path(&search_path) {
+                    index.add_entry(entry);
+                    println!("Index built successfully!");
+                    println!("Total files indexed: {}", index.len());
+                } else {
+                    println!("Error: Could not read file: {}", path);
+                }
+            }
         }
 
     }
