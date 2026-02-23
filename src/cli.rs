@@ -35,7 +35,7 @@ pub enum Commands {
 
         #[arg(short, long)]
         rebuild: bool,
-    }
+    },
 }
 
 impl Cli {

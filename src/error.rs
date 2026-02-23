@@ -1,5 +1,3 @@
-
-
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
     #[error("IO error: {0}")]

@@ -36,3 +36,4 @@
 |---|-------------|------|--------|--------|-----------|
 | 1 | 用Rust开发一个类似Everything的快速文件搜索工具 | 2026-02-23 | e141153 | | [1-rust-everything-ripgrep](./quick/1-rust-everything-ripgrep/) |
 | 2 | 实现文件索引和搜索功能 | 2026-02-23 | | | [2-file-index-search](./quick/2-file-index-search/) |
+| 3 | 添加NTFS MFT支持实现Windows快速索引 | 2026-02-23 | 4b78222 | | [3-ntfs-mft-windows](./quick/3-ntfs-mft-windows/) |

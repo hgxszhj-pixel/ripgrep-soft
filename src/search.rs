@@ -65,7 +65,7 @@ impl Searcher {
     fn regex_search<'a>(query: &SearchQuery, index: &'a FileIndex) -> Vec<&'a FileEntry> {
         let case_flag = if query.case_sensitive { "" } else { "(?i)" };
         let pattern = format!("{}{}", case_flag, query.pattern);
-        
+
         let re = match regex::Regex::new(&pattern) {
             Ok(r) => r,
             Err(_) => return Vec::new(),
@@ -110,7 +110,7 @@ mod tests {
 
         let query = SearchQuery::new("test".to_string());
         let results = Searcher::search(&query, &index);
-        
+
         assert_eq!(results.len(), 2);
     }
 
@@ -122,7 +122,7 @@ mod tests {
 
         let query = SearchQuery::new("test".to_string()).with_case_sensitive(true);
         let results = Searcher::search(&query, &index);
-        
+
         assert_eq!(results.len(), 1);
     }
 
@@ -135,7 +135,7 @@ mod tests {
 
         let query = SearchQuery::new(r"test\d+\.txt".to_string()).with_regex(true);
         let results = Searcher::search(&query, &index);
-        
+
         assert_eq!(results.len(), 2);
     }
 
@@ -144,7 +144,7 @@ mod tests {
         let index = FileIndex::new();
         let query = SearchQuery::new("".to_string());
         let results = Searcher::search(&query, &index);
-        
+
         assert!(results.is_empty());
     }
 }

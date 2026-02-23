@@ -1,6 +1,6 @@
 # ROADMAP
 
-> Last activity: 2026-02-23 - Completed quick task 2: 实现文件索引和搜索功能
+> Last activity: 2026-02-23 - Completed quick task 3: 添加NTFS MFT支持实现Windows快速索引
 
 ## Blockers/Concerns
 
