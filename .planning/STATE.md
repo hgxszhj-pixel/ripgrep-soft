@@ -38,4 +38,5 @@
 | 2 | 实现文件索引和搜索功能 | 2026-02-23 | 31303f6 | | [2-file-index-search](./quick/2-file-index-search/) |
 | 3 | 添加NTFS MFT支持实现Windows快速索引 | 2026-02-23 | 4b78222 | | [3-ntfs-mft-windows](./quick/3-ntfs-mft-windows/) |
 | 4 | 实现内容搜索功能ripgrep风格 | 2026-02-23 | 8d2c673 | | [4-ripgrep](./quick/4-ripgrep/) |
+| 5 | 实现Fuzzy搜索评分和排序功能 | 2026-02-23 | | | [5-fuzzy-rank](./quick/5-fuzzy-rank/) |
 

@@ -1,4 +1,6 @@
 use crate::index::{FileEntry, FileIndex};
+use fuzzy_matcher::skim::SkimMatcherV2;
+use fuzzy_matcher::FuzzyMatcher;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -45,24 +47,41 @@ impl Searcher {
     }
 
     fn fuzzy_search<'a>(query: &SearchQuery, index: &'a FileIndex) -> Vec<&'a FileEntry> {
-        let pattern = if query.case_sensitive {
-            query.pattern.clone()
+        let mut matcher = SkimMatcherV2::default();
+        if query.case_sensitive {
+            matcher = matcher.respect_case();
         } else {
-            query.pattern.to_lowercase()
-        };
+            matcher = matcher.ignore_case();
+        }
+        let case_sensitive = query.case_sensitive;
+        let pattern = &query.pattern;
 
-        index
+        // Collect matches with scores
+        let mut matches: Vec<(i64, &FileEntry)> = index
             .entries()
             .iter()
-            .filter(|entry| {
-                let name = if query.case_sensitive {
+            .filter_map(|entry| {
+                let name = if case_sensitive {
                     entry.name.clone()
                 } else {
                     entry.name.to_lowercase()
                 };
-                name.contains(&pattern)
+                let search_pattern = if case_sensitive {
+                    pattern.clone()
+                } else {
+                    pattern.to_lowercase()
+                };
+                
+                matcher.fuzzy_match(&name, &search_pattern)
+                    .map(|score| (score, entry))
             })
-            .collect()
+            .collect();
+
+        // Sort by score descending (best match first)
+        matches.sort_by(|a, b| b.0.cmp(&a.0));
+
+        // Return only the entries, sorted by score
+        matches.into_iter().map(|(_, entry)| entry).collect()
     }
 
     fn regex_search<'a>(query: &SearchQuery, index: &'a FileIndex) -> Vec<&'a FileEntry> {
