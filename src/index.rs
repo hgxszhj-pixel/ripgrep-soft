@@ -96,6 +96,37 @@ impl FileIndex {
     }
 }
 
+#[cfg(windows)]
+mod mft_integration {
+    use super::*;
+    use crate::mft_reader::{MftFileEntry, MftReader};
+    use std::time::UNIX_EPOCH;
+
+    impl FileIndex {
+        /// Create index from NTFS MFT (Windows only)
+        pub fn from_mft(volume: &str) -> Result<Self, crate::mft_reader::MftError> {
+            let reader = MftReader::new(volume)?;
+            let mft_entries = reader.read_entries()?;
+
+            let mut index = FileIndex::new();
+
+            for mft_entry in mft_entries {
+                if !mft_entry.is_directory {
+                    let entry = FileEntry {
+                        path: mft_entry.path,
+                        name: mft_entry.name,
+                        size: mft_entry.size,
+                        modified: UNIX_EPOCH,
+                    };
+                    index.entries.push(entry);
+                }
+            }
+
+            Ok(index)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
