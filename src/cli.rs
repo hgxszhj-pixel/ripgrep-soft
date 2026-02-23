@@ -17,17 +17,29 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum Commands {
     Search {
+        /// Path to search in (file or directory)
         #[arg(short, long, default_value = ".")]
         path: String,
 
+        /// Search pattern for filename search
         #[arg(long)]
         pattern: Option<String>,
 
-        #[arg(long)]
+        /// Content search pattern (search inside files)
+        #[arg(short = 'c', long = "content")]
         content: Option<String>,
 
-        #[arg(long)]
+        /// Use regex for pattern matching
+        #[arg(long, short = 'e')]
         regex: bool,
+
+        /// Case sensitive search
+        #[arg(long, short = 'i')]
+        case_sensitive: bool,
+
+        /// Number of lines of context around matches
+        #[arg(long = "context", short = 'C', default_value = "0")]
+        context: usize,
     },
     Index {
         #[arg(short, long, default_value = ".")]
