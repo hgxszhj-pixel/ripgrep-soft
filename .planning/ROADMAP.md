@@ -1,6 +1,6 @@
 # ROADMAP
 
-> Last activity: 2026-02-23 - Completed quick task 3: 添加NTFS MFT支持实现Windows快速索引
+> Last activity: 2026-02-23 - Completed quick task 4: 实现内容搜索功能ripgrep风格
 
 ## Blockers/Concerns
 
