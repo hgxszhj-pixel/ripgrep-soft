@@ -1,6 +1,6 @@
 # ROADMAP
 
-> Last activity: 2026-02-23 - Completed quick task 4: 实现内容搜索功能ripgrep风格
+> Last activity: 2026-02-23 - Completed Phase 1: Core Infrastructure (CLI integration)
 
 ## Blockers/Concerns
 
@@ -11,10 +11,11 @@
 ## Phases
 
 ### Phase 1: Core Infrastructure
-- [ ] Project setup: Cargo.toml, dependencies
-- [ ] Basic CLI structure with clap
-- [ ] Logging setup (tracing)
-- [ ] Error handling framework
+- [x] Project setup: Cargo.toml, dependencies
+- [x] Basic CLI structure with clap
+- [x] Logging setup (tracing)
+- [x] Error handling framework
+- [x] CLI integration for search and index commands
 
 ### Phase 2: File Indexing
 - [ ] NTFS MFT reader for Windows
