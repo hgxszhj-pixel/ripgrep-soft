@@ -1,0 +1,3 @@
+2026-02-23T03:29:18.154788Z  INFO ThreadId(01) ripgrep_soft: src\main.rs:11: ripgrep-soft starting up
+2026-02-23T03:29:18.154891Z  INFO ThreadId(01) ripgrep_soft: src\main.rs:20: Search command - path: ., pattern: Some("test"), content: None, regex: false
+2026-02-23T03:29:18.154938Z  INFO ThreadId(01) ripgrep_soft: src\main.rs:36: ripgrep-soft shutting down

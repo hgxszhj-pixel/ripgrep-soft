@@ -1,6 +1,6 @@
 # ROADMAP
 
-> Last activity: 2026-02-23 - Completed quick task 1: 用Rust开发一个类似Everything的快速文件搜索工具
+> Last activity: 2026-02-23 - Completed quick task 2: 实现文件索引和搜索功能
 
 ## Blockers/Concerns
 

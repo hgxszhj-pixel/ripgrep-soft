@@ -1,0 +1,7 @@
+D:\rust_project\ripgrep-soft\target\debug\deps\smallvec-4bf9bd40080fe3dd.d: C:\Users\zhj\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\smallvec-1.15.1\src\lib.rs
+
+D:\rust_project\ripgrep-soft\target\debug\deps\libsmallvec-4bf9bd40080fe3dd.rlib: C:\Users\zhj\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\smallvec-1.15.1\src\lib.rs
+
+D:\rust_project\ripgrep-soft\target\debug\deps\libsmallvec-4bf9bd40080fe3dd.rmeta: C:\Users\zhj\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\smallvec-1.15.1\src\lib.rs
+
+C:\Users\zhj\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\smallvec-1.15.1\src\lib.rs:
