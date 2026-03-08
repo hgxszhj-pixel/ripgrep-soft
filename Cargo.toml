@@ -1,9 +1,9 @@
 [package]
-name = "ripgrep-soft"
-version = "0.1.0"
+name = "turbo-search"
+version = "1.0.0"
 edition = "2021"
-description = "A high-performance file and content search tool combining Everything's instant filename search with ripgrep's content matching"
-authors = ["ripgrep-soft"]
+description = "A high-performance file and content search tool for Windows, combining Everything's instant filename search with ripgrep's powerful content matching"
+authors = ["TurboSearch Team"]
 license = "MIT"
 
 [dependencies]
