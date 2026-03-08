@@ -3,7 +3,7 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use rayon::prelude::*;
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Seek};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use dashmap::DashMap;
@@ -206,13 +206,11 @@ impl Searcher {
         index.entries()
             .iter()
             .filter(|entry| {
-                let name = &entry.name;
                 if case_sensitive {
-                    pattern.matches(name)
+                    pattern.matches(&entry.name)
                 } else {
-                    // For case-insensitive, match against pre-created lowercase pattern
-                    let name_lower = name.to_lowercase();
-                    pattern.matches(&name_lower)
+                    // For case-insensitive, use pre-computed name_lower field
+                    pattern.matches(&entry.name_lower)
                 }
             })
             .take(query.limit + query.offset)
@@ -238,16 +236,15 @@ impl Searcher {
         };
 
         // Collect matches with scores
-        // Optimization: Use Cow<str> to avoid unnecessary allocations in case-insensitive search
+        // Optimization: Use pre-computed name_lower field to avoid repeated allocations
         let pattern_str = pattern.as_str();
         let mut matches: Vec<(i64, &FileEntry)> = index
             .entries()
             .iter()
             .filter_map(|entry| {
-                // For case-insensitive, lowercase name for matching
+                // For case-insensitive, use pre-computed name_lower field
                 let name_ref = if search_pattern.is_some() {
-                    // Use to_lowercase() only once per entry, store in owned String
-                    std::borrow::Cow::Owned(entry.name.to_lowercase())
+                    std::borrow::Cow::Borrowed(&entry.name_lower)
                 } else {
                     std::borrow::Cow::Borrowed(&entry.name)
                 };
@@ -404,14 +401,28 @@ impl ContentSearcher {
     }
 
     fn search_file(query: &ContentSearchQuery, path: &Path) -> Vec<ContentMatch> {
-        if Self::is_binary_file(path) {
-            return Vec::new();
-        }
-
-        let file = match fs::File::open(path) {
+        // Optimization: Open file once, check binary, then seek back to start
+        let mut file = match fs::File::open(path) {
             Ok(f) => f,
             Err(_) => return Vec::new(),
         };
+
+        let mut buffer = [0u8; 8192];
+
+        // Check if binary by reading first chunk
+        match std::io::Read::read(&mut file, &mut buffer) {
+            Ok(n) => {
+                if buffer[..n].contains(&0) {
+                    return Vec::new(); // Binary file - skip
+                }
+            }
+            Err(_) => return Vec::new(),
+        }
+
+        // Seek back to start for line-by-line reading
+        if file.seek(std::io::SeekFrom::Start(0)).is_err() {
+            return Vec::new();
+        }
 
         let reader = BufReader::new(file);
         let mut matches = Vec::new();
@@ -447,31 +458,15 @@ impl ContentSearcher {
         matches
     }
 
-    fn is_binary_file(path: &Path) -> bool {
-        let file = match fs::File::open(path) {
-            Ok(f) => f,
-            Err(_) => return false,
-        };
-
-        let mut reader = BufReader::new(file);
-        let mut buffer = [0u8; 8192];
-
-        match std::io::Read::read(&mut reader, &mut buffer) {
-            Ok(n) => buffer[..n].contains(&0),
-            Err(_) => false,
-        }
-    }
-
     fn substring_match(pattern: &str, line: &str, case_sensitive: bool) -> Option<String> {
-        // Optimization: Avoid unnecessary allocations and duplicate find() calls
+        // Optimization: Accept pre-computed lowercase pattern to avoid repeated allocation
         if case_sensitive {
             // Direct case-sensitive search - no allocation needed
             line.find(pattern).map(|start| line[start..start + pattern.len()].to_string())
         } else {
-            // Case-insensitive: pre-compute lowercase pattern once
-            let pattern_lower = pattern.to_lowercase();
+            // Case-insensitive: pattern already lowercase, just convert line once
             let line_lower = line.to_lowercase();
-            line_lower.find(&pattern_lower).map(|start| line[start..start + pattern.len()].to_string())
+            line_lower.find(pattern).map(|start| line[start..start + pattern.len()].to_string())
         }
     }
 
@@ -496,6 +491,7 @@ mod tests {
         FileEntry {
             path: PathBuf::from(format!("/test/{}", name)),
             name: name.to_string(),
+            name_lower: name.to_lowercase(),
             size: 100,
             modified: std::time::SystemTime::now(),
         }
@@ -545,6 +541,94 @@ mod tests {
         let results = Searcher::search(&query, &index);
 
         assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn test_glob_search_basic() {
+        let mut index = FileIndex::new();
+        index.add_entry(create_test_entry("document.pdf"));
+        index.add_entry(create_test_entry("image.png"));
+        index.add_entry(create_test_entry("photo.jpg"));
+        index.add_entry(create_test_entry("data.txt"));
+
+        // Test simple glob pattern
+        let query = SearchQuery::new("*.txt".to_string()).with_glob(true);
+        let results = Searcher::search(&query, &index);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "data.txt");
+    }
+
+    #[test]
+    fn test_glob_search_multiple_extensions() {
+        let mut index = FileIndex::new();
+        index.add_entry(create_test_entry("file1.txt"));
+        index.add_entry(create_test_entry("file2.pdf"));
+        index.add_entry(create_test_entry("file3.txt"));
+        index.add_entry(create_test_entry("file4.md"));
+
+        // Test glob with multiple matches
+        let query = SearchQuery::new("*.txt".to_string()).with_glob(true);
+        let results = Searcher::search(&query, &index);
+
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn test_glob_search_case_insensitive() {
+        let mut index = FileIndex::new();
+        index.add_entry(create_test_entry("Document.TXT"));
+        index.add_entry(create_test_entry("FILE.txt"));
+        index.add_entry(create_test_entry("file.pdf"));
+
+        // Default: case-insensitive glob
+        let query = SearchQuery::new("*.txt".to_string()).with_glob(true);
+        let results = Searcher::search(&query, &index);
+
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn test_glob_search_case_sensitive() {
+        let mut index = FileIndex::new();
+        index.add_entry(create_test_entry("Document.TXT"));
+        index.add_entry(create_test_entry("FILE.txt"));
+        index.add_entry(create_test_entry("file.txt"));
+
+        // Case-sensitive glob
+        let query = SearchQuery::new("*.TXT".to_string())
+            .with_glob(true)
+            .with_case_sensitive(true);
+        let results = Searcher::search(&query, &index);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "Document.TXT");
+    }
+
+    #[test]
+    fn test_glob_search_question_mark() {
+        let mut index = FileIndex::new();
+        index.add_entry(create_test_entry("file1.txt"));
+        index.add_entry(create_test_entry("file2.txt"));
+        index.add_entry(create_test_entry("file10.txt"));
+
+        // ? matches single character
+        let query = SearchQuery::new("file?.txt".to_string()).with_glob(true);
+        let results = Searcher::search(&query, &index);
+
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn test_glob_search_invalid_pattern() {
+        let mut index = FileIndex::new();
+        index.add_entry(create_test_entry("test.txt"));
+
+        // Invalid glob pattern should return empty results
+        let query = SearchQuery::new("[invalid".to_string()).with_glob(true);
+        let results = Searcher::search(&query, &index);
+
+        assert!(results.is_empty());
     }
 
     #[test]

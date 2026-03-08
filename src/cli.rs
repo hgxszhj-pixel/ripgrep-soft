@@ -33,6 +33,10 @@ pub enum Commands {
         #[arg(long, short = 'e')]
         regex: bool,
 
+        /// Use glob pattern matching (e.g., *.mp4, *.txt)
+        #[arg(long, short = 'g')]
+        glob: bool,
+
         /// Case sensitive search
         #[arg(long, short = 'i')]
         case_sensitive: bool,
