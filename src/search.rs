@@ -1,14 +1,123 @@
 use crate::index::{FileEntry, FileIndex};
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
+use rayon::prelude::*;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use dashmap::DashMap;
+
+// Global regex cache for better performance - DashMap for lock-free concurrent reads
+// Optimization: Bounded cache to prevent memory leaks
+lazy_static::lazy_static! {
+    static ref REGEX_CACHE: DashMap<String, Arc<regex::Regex>> = DashMap::new();
+}
+
+// Maximum number of cached regex patterns
+const MAX_REGEX_CACHE_SIZE: usize = 1000;
+
+/// File size filter - min and max size in bytes
+/// Uses u64 with sentinel values for efficiency (no Option overhead)
+#[derive(Clone, Debug, Default)]
+pub struct SizeFilter {
+    pub min_size: u64,      // 0 means no minimum
+    pub max_size: u64,      // u64::MAX means no maximum
+}
+
+impl SizeFilter {
+    /// Create a new SizeFilter with min and max bounds
+    pub fn new(min: u64, max: u64) -> Self {
+        Self { min_size: min, max_size: max }
+    }
+
+    /// Parse size string - handles formats like "1m", "<10k", "1m-10m"
+    pub fn from_string(s: &str) -> Option<Self> {
+        if s.is_empty() {
+            return None;
+        }
+
+        let s_lower = s.trim().to_lowercase();
+        let (prefix, rest) = if let Some(stripped) = s_lower.strip_prefix('<') {
+            ('<', stripped.trim_start())
+        } else if let Some(stripped) = s_lower.strip_prefix('>') {
+            ('>', stripped.trim_start())
+        } else {
+            (' ', s_lower.as_str())
+        };
+
+        let (num_str, unit) = if let Some(idx) = rest.find(|c: char| !c.is_ascii_digit()) {
+            (&rest[..idx], &rest[idx..])
+        } else {
+            (rest, "")
+        };
+
+        let num: u64 = num_str.parse().ok()?;
+        let multiplier: u64 = match unit {
+            "k" | "kb" => 1024,
+            "m" | "mb" => 1024 * 1024,
+            "g" | "gb" => 1024 * 1024 * 1024,
+            "b" | "" => 1,
+            _ => return None,
+        };
+
+        let size = num * multiplier;
+
+        match prefix {
+            '<' => Some(Self { min_size: 0, max_size: size }),
+            '>' => Some(Self { min_size: size, max_size: u64::MAX }),
+            _ => Some(Self { min_size: size, max_size: u64::MAX }),
+        }
+    }
+
+    /// Create a range filter from "min-max" format
+    pub fn from_range(s: &str) -> Option<Self> {
+        let s = s.trim();
+        if s.is_empty() {
+            return None;
+        }
+
+        if let Some((min_str, max_str)) = s.split_once('-') {
+            let min_size = if min_str.is_empty() {
+                0
+            } else {
+                Self::from_string(min_str)
+                    .map(|f| f.min_size.max(f.max_size))
+                    .unwrap_or(0)
+            };
+            let max_size = if max_str.is_empty() {
+                u64::MAX
+            } else {
+                Self::from_string(max_str)
+                    .map(|f| f.min_size.max(f.max_size))
+                    .unwrap_or(u64::MAX)
+            };
+            Some(Self { min_size, max_size })
+        } else {
+            Self::from_string(s)
+        }
+    }
+
+    /// Check if a file size matches this filter
+    pub fn matches(&self, size: u64) -> bool {
+        if self.min_size > 0 && size < self.min_size {
+            return false;
+        }
+        if self.max_size < u64::MAX && size > self.max_size {
+            return false;
+        }
+        true
+    }
+}
 
 pub struct SearchQuery {
     pub pattern: String,
     pub case_sensitive: bool,
     pub regex: bool,
+    pub glob: bool,
+    pub offset: usize,
+    pub limit: usize,
+    pub size_filter: SizeFilter,
 }
 
 impl SearchQuery {
@@ -17,6 +126,10 @@ impl SearchQuery {
             pattern,
             case_sensitive: false,
             regex: false,
+            glob: false,
+            offset: 0,
+            limit: 100,
+            size_filter: SizeFilter::default(),
         }
     }
 
@@ -29,6 +142,26 @@ impl SearchQuery {
         self.regex = regex;
         self
     }
+
+    pub fn with_glob(mut self, glob: bool) -> Self {
+        self.glob = glob;
+        self
+    }
+
+    pub fn with_offset(mut self, offset: usize) -> Self {
+        self.offset = offset;
+        self
+    }
+
+    pub fn with_limit(mut self, limit: usize) -> Self {
+        self.limit = limit;
+        self
+    }
+
+    pub fn with_size_filter(mut self, size_filter: SizeFilter) -> Self {
+        self.size_filter = size_filter;
+        self
+    }
 }
 
 pub struct Searcher;
@@ -39,11 +172,52 @@ impl Searcher {
             return Vec::new();
         }
 
-        if query.regex {
+        if query.glob {
+            Self::glob_search(query, index)
+        } else if query.regex {
             Self::regex_search(query, index)
         } else {
             Self::fuzzy_search(query, index)
         }
+    }
+
+    /// Glob pattern search (e.g., *.mp4, *.txt, document?.pdf)
+    fn glob_search<'a>(query: &SearchQuery, index: &'a FileIndex) -> Vec<&'a FileEntry> {
+        use glob::Pattern;
+
+        let case_sensitive = query.case_sensitive;
+
+        // Optimization: Pre-create pattern once outside the loop
+        let pattern = if case_sensitive {
+            match Pattern::new(&query.pattern) {
+                Ok(p) => Some(p),
+                Err(_) => return Vec::new(),
+            }
+        } else {
+            let pattern_lower = query.pattern.to_lowercase();
+            Pattern::new(&pattern_lower).ok()
+        };
+
+        let pattern = match pattern {
+            Some(p) => p,
+            None => return Vec::new(),
+        };
+
+        index.entries()
+            .iter()
+            .filter(|entry| {
+                let name = &entry.name;
+                if case_sensitive {
+                    pattern.matches(name)
+                } else {
+                    // For case-insensitive, match against pre-created lowercase pattern
+                    let name_lower = name.to_lowercase();
+                    pattern.matches(&name_lower)
+                }
+            })
+            .take(query.limit + query.offset)
+            .skip(query.offset)
+            .collect()
     }
 
     fn fuzzy_search<'a>(query: &SearchQuery, index: &'a FileIndex) -> Vec<&'a FileEntry> {
@@ -56,23 +230,30 @@ impl Searcher {
         let case_sensitive = query.case_sensitive;
         let pattern = &query.pattern;
 
+        // Pre-compute lowercase pattern once (outside loop) - memory optimization
+        let search_pattern = if case_sensitive {
+            None
+        } else {
+            Some(pattern.to_lowercase())
+        };
+
         // Collect matches with scores
+        // Optimization: Use Cow<str> to avoid unnecessary allocations in case-insensitive search
+        let pattern_str = pattern.as_str();
         let mut matches: Vec<(i64, &FileEntry)> = index
             .entries()
             .iter()
             .filter_map(|entry| {
-                let name = if case_sensitive {
-                    entry.name.clone()
+                // For case-insensitive, lowercase name for matching
+                let name_ref = if search_pattern.is_some() {
+                    // Use to_lowercase() only once per entry, store in owned String
+                    std::borrow::Cow::Owned(entry.name.to_lowercase())
                 } else {
-                    entry.name.to_lowercase()
+                    std::borrow::Cow::Borrowed(&entry.name)
                 };
-                let search_pattern = if case_sensitive {
-                    pattern.clone()
-                } else {
-                    pattern.to_lowercase()
-                };
-                
-                matcher.fuzzy_match(&name, &search_pattern)
+
+                let pattern_to_use = search_pattern.as_deref().unwrap_or(pattern_str);
+                matcher.fuzzy_match(&name_ref, pattern_to_use)
                     .map(|score| (score, entry))
             })
             .collect();
@@ -85,12 +266,10 @@ impl Searcher {
     }
 
     fn regex_search<'a>(query: &SearchQuery, index: &'a FileIndex) -> Vec<&'a FileEntry> {
-        let case_flag = if query.case_sensitive { "" } else { "(?i)" };
-        let pattern = format!("{}{}", case_flag, query.pattern);
-
-        let re = match regex::Regex::new(&pattern) {
-            Ok(r) => r,
-            Err(_) => return Vec::new(),
+        // Use cached regex for better performance
+        let re = match Self::get_cached_regex(&query.pattern, query.case_sensitive) {
+            Some(r) => r,
+            None => return Vec::new(),
         };
 
         index
@@ -99,6 +278,40 @@ impl Searcher {
             .filter(|entry| re.is_match(&entry.name))
             .collect()
     }
+
+    /// Get or compile a regex pattern with caching using DashMap (lock-free concurrent reads)
+    fn get_cached_regex(pattern: &str, case_sensitive: bool) -> Option<Arc<regex::Regex>> {
+        let case_flag = if case_sensitive { "" } else { "(?i)" };
+        // Use same format as original: case_flag + pattern (e.g., (?i)test\d+\.txt)
+        let cache_key = format!("{}{}", case_flag, pattern);
+
+        // Try to get from cache first - DashMap allows concurrent reads without locking
+        if let Some(entry) = REGEX_CACHE.get(&cache_key) {
+            return Some(entry.clone());
+        }
+
+        // Compile and cache if not found
+        if let Ok(regex) = regex::Regex::new(&cache_key) {
+            let arc_regex = Arc::new(regex);
+
+            // Optimization: Enforce cache size limit to prevent memory leaks
+            if REGEX_CACHE.len() >= MAX_REGEX_CACHE_SIZE {
+                // Clear oldest entries (first 10% of cache)
+                let keys_to_remove: Vec<_> = REGEX_CACHE.iter()
+                    .take(MAX_REGEX_CACHE_SIZE / 10)
+                    .map(|r| r.key().clone())
+                    .collect();
+                for key in keys_to_remove {
+                    REGEX_CACHE.remove(&key);
+                }
+            }
+
+            REGEX_CACHE.insert(cache_key, arc_regex.clone());
+            return Some(arc_regex);
+        }
+
+        None
+    }
 }
 
 pub struct ContentSearchQuery {
@@ -106,6 +319,7 @@ pub struct ContentSearchQuery {
     pub case_sensitive: bool,
     pub regex: bool,
     pub max_context: usize,
+    pub size_filter: SizeFilter,
 }
 
 impl ContentSearchQuery {
@@ -115,6 +329,7 @@ impl ContentSearchQuery {
             case_sensitive: false,
             regex: false,
             max_context: 0,
+            size_filter: SizeFilter::default(),
         }
     }
 
@@ -130,6 +345,11 @@ impl ContentSearchQuery {
 
     pub fn with_max_context(mut self, max_context: usize) -> Self {
         self.max_context = max_context;
+        self
+    }
+
+    pub fn with_size_filter(mut self, size_filter: SizeFilter) -> Self {
+        self.size_filter = size_filter;
         self
     }
 }
@@ -149,7 +369,8 @@ impl ContentSearcher {
             return Vec::new();
         }
 
-        let mut matches = Vec::new();
+        // Optimization: Collect all file paths first for parallel processing
+        let mut file_paths = Vec::new();
 
         for path in paths {
             if path.is_dir() {
@@ -157,16 +378,29 @@ impl ContentSearcher {
                     for entry in entries.flatten() {
                         let entry_path = entry.path();
                         if entry_path.is_file() {
-                            matches.extend(Self::search_file(query, &entry_path));
+                            file_paths.push(entry_path);
                         }
                     }
                 }
             } else if path.is_file() {
-                matches.extend(Self::search_file(query, path));
+                file_paths.push(path.clone());
             }
         }
 
-        matches
+        // Optimization: Use rayon for parallel file search when there are multiple files
+        if file_paths.len() > 10 {
+            // Parallel search for better performance with many files
+            file_paths
+                .par_iter()
+                .flat_map(|path| Self::search_file(query, path))
+                .collect()
+        } else {
+            // Sequential search for small number of files (less overhead)
+            file_paths
+                .iter()
+                .flat_map(|path| Self::search_file(query, path))
+                .collect()
+        }
     }
 
     fn search_file(query: &ContentSearchQuery, path: &Path) -> Vec<ContentMatch> {
@@ -223,40 +457,27 @@ impl ContentSearcher {
         let mut buffer = [0u8; 8192];
 
         match std::io::Read::read(&mut reader, &mut buffer) {
-            Ok(n) => buffer[..n].iter().any(|&b| b == 0),
+            Ok(n) => buffer[..n].contains(&0),
             Err(_) => false,
         }
     }
 
     fn substring_match(pattern: &str, line: &str, case_sensitive: bool) -> Option<String> {
-        let search_line = if case_sensitive {
-            line.to_string()
+        // Optimization: Avoid unnecessary allocations and duplicate find() calls
+        if case_sensitive {
+            // Direct case-sensitive search - no allocation needed
+            line.find(pattern).map(|start| line[start..start + pattern.len()].to_string())
         } else {
-            line.to_lowercase()
-        };
-
-        if search_line.contains(pattern) {
-            if case_sensitive {
-                if let Some(start) = line.find(pattern) {
-                    return Some(line[start..start + pattern.len()].to_string());
-                }
-            } else {
-                if let Some(start) = search_line.find(pattern) {
-                    return Some(line[start..start + pattern.len()].to_string());
-                }
-            }
+            // Case-insensitive: pre-compute lowercase pattern once
+            let pattern_lower = pattern.to_lowercase();
+            let line_lower = line.to_lowercase();
+            line_lower.find(&pattern_lower).map(|start| line[start..start + pattern.len()].to_string())
         }
-        None
     }
 
     fn regex_match(pattern: &str, line: &str, case_sensitive: bool) -> Option<String> {
-        let case_flag = if case_sensitive { "" } else { "(?i)" };
-        let full_pattern = format!("{}{}", case_flag, pattern);
-
-        let re = match regex::Regex::new(&full_pattern) {
-            Ok(r) => r,
-            Err(_) => return None,
-        };
+        // Use cached regex for better performance
+        let re = Searcher::get_cached_regex(pattern, case_sensitive)?;
 
         if let Some(m) = re.find(line) {
             return Some(m.as_str().to_string());

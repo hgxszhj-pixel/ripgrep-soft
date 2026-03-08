@@ -3,9 +3,47 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
+use rayon::prelude::*;
+use walkdir::WalkDir;
+
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
+
+#[cfg(windows)]
+use jwalk::WalkDir as JwalkWalkDir;
+
+/// Convert OsStr to String - handles UTF-8, UTF-16, and GBK on Windows
+pub fn os_str_to_string(os_str: &std::ffi::OsStr) -> String {
+    // First try UTF-8
+    if let Some(s) = os_str.to_str() {
+        return s.to_string();
+    }
+
+    #[cfg(windows)]
+    {
+        // On Windows, OsStr is typically UTF-16 encoded
+        let wide: Vec<u16> = os_str.encode_wide().collect();
+        let bytes: Vec<u8> = wide.iter().flat_map(|&w| w.to_le_bytes()).collect();
+
+        // Try UTF-16LE decoding first
+        let (decoded, _, had_errors) = encoding_rs::UTF_16LE.decode(&bytes);
+        if !had_errors {
+            return decoded.into_owned();
+        }
+
+        // Try GBK decoding (common on Chinese Windows)
+        let (decoded_gbk, _, had_errors_gbk) = encoding_rs::GBK.decode(&bytes);
+        if !had_errors_gbk {
+            return decoded_gbk.into_owned();
+        }
+    }
+
+    // Fallback to lossy
+    os_str.to_string_lossy().into_owned()
+}
 
 /// Represents a single file entry in the index
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FileEntry {
     /// Full path to the file
     pub path: PathBuf,
@@ -15,6 +53,37 @@ pub struct FileEntry {
     pub size: u64,
     /// Last modification time
     pub modified: SystemTime,
+}
+
+/// In-memory file index structure
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FileIndex {
+    /// Root path of the index
+    pub path: PathBuf,
+    /// Last modified time
+    pub modified: SystemTime,
+    /// File entries
+    entries: Vec<FileEntry>,
+}
+
+/// Indexing options for fine-tuned control
+pub struct IndexOptions {
+    /// Skip hidden files (files starting with . on Unix, or with hidden attribute on Windows)
+    pub skip_hidden: bool,
+    /// Skip system files
+    pub skip_system: bool,
+    /// Maximum depth for directory traversal (None = unlimited)
+    pub max_depth: Option<usize>,
+}
+
+impl Default for IndexOptions {
+    fn default() -> Self {
+        Self {
+            skip_hidden: true,
+            skip_system: true,
+            max_depth: None,
+        }
+    }
 }
 
 impl FileEntry {
@@ -32,16 +101,18 @@ impl FileEntry {
     }
 }
 
-/// In-memory file index structure
-#[derive(Debug, Default)]
-pub struct FileIndex {
-    entries: Vec<FileEntry>,
+impl Default for FileIndex {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl FileIndex {
     /// Create a new empty index
     pub fn new() -> Self {
         Self {
+            path: PathBuf::new(),
+            modified: SystemTime::now(),
             entries: Vec::new(),
         }
     }
@@ -56,23 +127,31 @@ impl FileIndex {
         Ok(())
     }
 
+    /// Walk directory recursively using WalkDir for better performance
+    /// Optimized: Single-pass traversal with capacity hint
     fn walk_directory_recursive(&mut self, path: &Path) {
-        let read_dir = match fs::read_dir(path) {
-            Ok(rd) => rd,
-            Err(_) => return,
-        };
+        // Single-pass: collect file paths directly without counting first
+        // Use min_depth(1) to skip the root directory itself
+        let file_paths: Vec<PathBuf> = WalkDir::new(path)
+            .min_depth(1)
+            .follow_links(false)
+            .same_file_system(true)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+            .map(|e| e.path().to_path_buf())
+            .collect();
 
-        for entry in read_dir.flatten() {
-            let entry_path = entry.path();
+        // Pre-allocate with collected count
+        self.entries.reserve(file_paths.len());
 
-            if entry_path.is_dir() {
-                self.walk_directory_recursive(&entry_path);
-            } else if entry_path.is_file() {
-                if let Some(file_entry) = FileEntry::from_path(&entry_path) {
-                    self.entries.push(file_entry);
-                }
-            }
-        }
+        // Parallel metadata fetching
+        let entries: Vec<FileEntry> = file_paths
+            .par_iter()
+            .filter_map(|p| FileEntry::from_path(p))
+            .collect();
+
+        self.entries.extend(entries);
     }
 
     /// Add a file entry to the index
@@ -94,12 +173,416 @@ impl FileIndex {
     pub fn entries(&self) -> &[FileEntry] {
         &self.entries
     }
+
+    /// Create a new index with root path
+    pub fn with_root(path: &Path) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            modified: SystemTime::now(),
+            entries: Vec::new(),
+        }
+    }
+
+    /// Save index to file
+    pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        let json = serde_json::to_string(self)?;
+        std::fs::write(path, json)
+    }
+
+    /// Load index from file with security validation
+    pub fn load(path: &Path) -> std::io::Result<Self> {
+        let content = std::fs::read_to_string(path)?;
+        let mut index: FileIndex = serde_json::from_str(&content)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+        // Security: Validate that stored paths are within the indexed root directory
+        // This prevents path traversal attacks via malicious index files
+        let root_path = index.path.canonicalize()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+        // Optimization: Pre-compute root string once outside the loop
+        let root_str = root_path.to_string_lossy().to_lowercase();
+
+        for entry in index.entries.iter_mut() {
+            if let Ok(canonical) = entry.path.canonicalize() {
+                // Verify the canonical path starts with the root path
+                let canonical_str = canonical.to_string_lossy().to_lowercase();
+                if !canonical_str.starts_with(&root_str) {
+                    // Path traversal detected - skip this entry
+                    entry.path = root_path.join(&entry.name);
+                }
+            }
+        }
+
+        Ok(index)
+    }
+
+    /// Get root path (alias for path field)
+    pub fn root_path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Walk a directory with a maximum file limit (for quick indexing)
+    /// Optimized: Single-pass traversal with early termination
+    pub fn walk_directory_limited(&mut self, path: &Path, max_files: usize) -> std::io::Result<usize> {
+        if !path.exists() {
+            return Ok(0);
+        }
+
+        // Pre-allocate capacity to avoid re-allocations
+        let capacity = max_files.min(1_000_000);
+        self.entries.reserve(capacity);
+
+        // Single-pass: collect file paths with early termination
+        // Use min_depth(1) to skip root, same_file_system to avoid mount traversal
+        let file_paths: Vec<PathBuf> = WalkDir::new(path)
+            .min_depth(1)
+            .follow_links(false)
+            .same_file_system(true)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+            .map(|e| e.path().to_path_buf())
+            .take(max_files)
+            .collect();
+
+        let count = file_paths.len();
+
+        // For small file counts, sequential is faster than parallel overhead
+        // Use parallel for larger workloads (threshold: 1000 files)
+        let entries: Vec<FileEntry> = if count > 1000 {
+            file_paths
+                .par_iter()
+                .filter_map(|p| FileEntry::from_path(p))
+                .collect()
+        } else {
+            file_paths
+                .iter()
+                .filter_map(|p| FileEntry::from_path(p))
+                .collect()
+        };
+
+        self.entries.extend(entries);
+
+        Ok(count)
+    }
+
+    /// Walk directory with parallel processing (unlimited)
+    /// Optimized: Single-pass traversal
+    pub fn walk_directory_parallel(&mut self, path: &Path) -> std::io::Result<usize> {
+        if !path.exists() {
+            return Ok(0);
+        }
+
+        // Single-pass: collect file paths without counting first
+        let file_paths: Vec<PathBuf> = WalkDir::new(path)
+            .min_depth(1)
+            .follow_links(false)
+            .same_file_system(true)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+            .map(|e| e.path().to_path_buf())
+            .collect();
+
+        let count = file_paths.len();
+        self.entries.reserve(count);
+
+        // Parallel metadata fetching
+        let entries: Vec<FileEntry> = file_paths
+            .par_iter()
+            .filter_map(|p| FileEntry::from_path(p))
+            .collect();
+
+        self.entries.extend(entries);
+
+        Ok(count)
+    }
+
+    /// Walk directory with options and parallel processing
+    /// Optimized: Single-pass with efficient filtering
+    pub fn walk_directory_with_options(
+        &mut self,
+        path: &Path,
+        options: &IndexOptions,
+    ) -> std::io::Result<usize> {
+        if !path.exists() {
+            return Ok(0);
+        }
+
+        // Build WalkDir with options
+        let mut walker = WalkDir::new(path)
+            .min_depth(1)
+            .follow_links(false)
+            .same_file_system(true);
+
+        if let Some(max_depth) = options.max_depth {
+            walker = walker.max_depth(max_depth);
+        }
+
+        // Collect file paths with optimized filtering
+        // Use a closure to avoid code duplication
+        #[cfg(windows)]
+        let file_paths: Vec<PathBuf> = walker
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                if e.file_type().is_dir() {
+                    return true;
+                }
+
+                // Skip hidden/system files using cached metadata if available
+                if options.skip_hidden || options.skip_system {
+                    use std::os::windows::fs::MetadataExt;
+                    // Use metadata_from_entry if possible (WalkDir caches it)
+                    if let Ok(meta) = e.metadata() {
+                        let attrs = meta.file_attributes();
+                        // FILE_ATTRIBUTE_HIDDEN = 0x2, FILE_ATTRIBUTE_SYSTEM = 0x4
+                        if options.skip_hidden && (attrs & 0x2) != 0 {
+                            return false;
+                        }
+                        if options.skip_system && (attrs & 0x4) != 0 {
+                            return false;
+                        }
+                    }
+                }
+
+                true
+            })
+            .filter(|e| e.file_type().is_file())
+            .map(|e| e.path().to_path_buf())
+            .collect();
+
+        #[cfg(not(windows))]
+        let file_paths: Vec<PathBuf> = walker
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                if e.file_type().is_dir() {
+                    return true;
+                }
+
+                let file_name = e.file_name();
+                if options.skip_hidden && file_name.to_string_lossy().starts_with('.') {
+                    return false;
+                }
+
+                true
+            })
+            .filter(|e| e.file_type().is_file())
+            .map(|e| e.path().to_path_buf())
+            .collect();
+
+        let count = file_paths.len();
+
+        // Pre-allocate capacity
+        self.entries.reserve(count);
+
+        // Parallel metadata fetching
+        let entries: Vec<FileEntry> = file_paths
+            .par_iter()
+            .filter_map(|p| FileEntry::from_path(p))
+            .collect();
+
+        self.entries.extend(entries);
+
+        Ok(count)
+    }
+
+    /// Walk directory with maximum performance for very large directories
+    /// Uses parallel directory scanning - each top-level subdirectory is processed in parallel
+    /// This is optimal for directories with many subdirectories (e.g., C:\Users)
+    pub fn walk_directory_parallel_high_performance(&mut self, path: &Path, max_files: usize) -> std::io::Result<usize> {
+        if !path.exists() {
+            return Ok(0);
+        }
+
+        // First, get list of top-level entries
+        let mut top_level_dirs: Vec<PathBuf> = Vec::new();
+        let mut top_level_files: Vec<PathBuf> = Vec::new();
+
+        for entry in WalkDir::new(path)
+            .min_depth(1)
+            .max_depth(1)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            let entry_path = entry.path().to_path_buf();
+            if entry.file_type().is_dir() {
+                top_level_dirs.push(entry_path);
+            } else if entry.file_type().is_file() {
+                top_level_files.push(entry_path);
+            }
+        }
+
+        // Add top-level files directly
+        if !top_level_files.is_empty() {
+            let files: Vec<FileEntry> = top_level_files
+                .par_iter()
+                .filter_map(|p| FileEntry::from_path(p))
+                .collect();
+            self.entries.extend(files);
+        }
+
+        if top_level_dirs.is_empty() {
+            return Ok(self.entries.len());
+        }
+
+        // Pre-allocate based on estimate
+        self.entries.reserve(max_files.min(1_000_000));
+
+        // Process each top-level directory in parallel and collect all paths
+        let remaining_slots = max_files.saturating_sub(self.entries.len());
+
+        // First collect all paths from parallel directories
+        let all_paths: Vec<PathBuf> = top_level_dirs
+            .par_iter()
+            .flat_map(|dir| {
+                WalkDir::new(dir)
+                    .min_depth(1)
+                    .follow_links(false)
+                    .same_file_system(true)
+                    .into_iter()
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.file_type().is_file())
+                    .map(|e| e.path().to_path_buf())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+
+        // Then take only what we need
+        let all_paths: Vec<PathBuf> = all_paths.into_iter().take(remaining_slots).collect();
+
+        let _count = all_paths.len();
+
+        // Parallel metadata fetching
+        let entries: Vec<FileEntry> = all_paths
+            .par_iter()
+            .filter_map(|p| FileEntry::from_path(p))
+            .collect();
+
+        self.entries.extend(entries);
+
+        Ok(self.entries.len())
+    }
+
+    /// Walk directory using jwalk for high-performance parallel traversal
+    /// jwalk is ~4x faster than walkdir for sorted results with metadata
+    /// Uses Rayon for parallel directory processing
+    #[cfg(windows)]
+    pub fn walk_directory_jwalk(&mut self, path: &Path, max_files: usize) -> std::io::Result<usize> {
+        if !path.exists() {
+            return Ok(0);
+        }
+
+        // Pre-allocate capacity
+        let capacity = max_files.min(1_000_000);
+        self.entries.reserve(capacity);
+
+        // Use jwalk for parallel directory traversal
+        // jwalk processes directories in parallel using Rayon
+        let file_paths: Vec<PathBuf> = JwalkWalkDir::new(path)
+            .sort(true)  // Enable sorted results (jwalk's strength)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+            .map(|e| e.path().to_path_buf())
+            .take(max_files)
+            .collect();
+
+        let count = file_paths.len();
+
+        // Adaptive parallel processing
+        let entries: Vec<FileEntry> = if count > 1000 {
+            file_paths
+                .par_iter()
+                .filter_map(|p| FileEntry::from_path(p))
+                .collect()
+        } else {
+            file_paths
+                .iter()
+                .filter_map(|p| FileEntry::from_path(p))
+                .collect()
+        };
+
+        self.entries.extend(entries);
+
+        Ok(count)
+    }
+
+    /// Walk directory using jwalk with custom filtering
+    /// Supports skip_hidden and skip_system options
+    #[cfg(windows)]
+    pub fn walk_directory_jwalk_with_options(
+        &mut self,
+        path: &Path,
+        options: &IndexOptions,
+        max_files: usize,
+    ) -> std::io::Result<usize> {
+        if !path.exists() {
+            return Ok(0);
+        }
+
+        let capacity = max_files.min(1_000_000);
+        self.entries.reserve(capacity);
+
+        // jwalk with sorting enabled
+        let file_paths: Vec<PathBuf> = JwalkWalkDir::new(path)
+            .sort(true)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                if e.file_type().is_dir() {
+                    return true;
+                }
+
+                // Skip hidden/system files
+                if options.skip_hidden || options.skip_system {
+                    use std::os::windows::fs::MetadataExt;
+                    if let Ok(meta) = e.metadata() {
+                        let attrs = meta.file_attributes();
+                        // FILE_ATTRIBUTE_HIDDEN = 0x2, FILE_ATTRIBUTE_SYSTEM = 0x4
+                        if options.skip_hidden && (attrs & 0x2) != 0 {
+                            return false;
+                        }
+                        if options.skip_system && (attrs & 0x4) != 0 {
+                            return false;
+                        }
+                    }
+                }
+
+                true
+            })
+            .filter(|e| e.file_type().is_file())
+            .map(|e| e.path().to_path_buf())
+            .take(max_files)
+            .collect();
+
+        let count = file_paths.len();
+
+        let entries: Vec<FileEntry> = if count > 1000 {
+            file_paths
+                .par_iter()
+                .filter_map(|p| FileEntry::from_path(p))
+                .collect()
+        } else {
+            file_paths
+                .iter()
+                .filter_map(|p| FileEntry::from_path(p))
+                .collect()
+        };
+
+        self.entries.extend(entries);
+
+        Ok(count)
+    }
 }
 
 #[cfg(windows)]
 mod mft_integration {
     use super::*;
-    use crate::mft_reader::{MftFileEntry, MftReader};
+    use crate::mft_reader::MftReader;
     use std::time::UNIX_EPOCH;
 
     impl FileIndex {
@@ -133,7 +616,6 @@ mod tests {
     use std::env;
     use std::fs::{self, File};
     use std::io::Write;
-
     #[test]
     fn test_file_entry_from_path() {
         // Create a temporary file
