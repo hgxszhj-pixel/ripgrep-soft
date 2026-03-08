@@ -16,6 +16,21 @@ anyhow = "1.0"
 regex = "1.10"
 fuzzy-matcher = "0.3"
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+lazy_static = "1.4"
+dashmap = "5.5"
+eframe = "0.33"
+rfd = "0.15"
+dirs = "5.0"
+walkdir = "2.4"
+jwalk = "0.6"
+ignore = "0.4"
+glob = "0.3"
+notify = "7.0"
+notify-debouncer-mini = "0.5"
+rayon = "1.8"
+encoding_rs = "0.8"
+zip = "2.2"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [

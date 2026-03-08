@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use rayon::prelude::*;
 use walkdir::WalkDir;
+use ignore::WalkBuilder;
 
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
@@ -564,6 +565,48 @@ impl FileIndex {
 
         let count = file_paths.len();
 
+        let entries: Vec<FileEntry> = if count > 1000 {
+            file_paths
+                .par_iter()
+                .filter_map(|p| FileEntry::from_path(p))
+                .collect()
+        } else {
+            file_paths
+                .iter()
+                .filter_map(|p| FileEntry::from_path(p))
+                .collect()
+        };
+
+        self.entries.extend(entries);
+
+        Ok(count)
+    }
+
+    /// Walk directory with .gitignore support using ignore crate
+    /// This respects .gitignore, .ignore, and other ignore files
+    pub fn walk_directory_with_ignore(&mut self, path: &Path, max_files: usize) -> std::io::Result<usize> {
+        if !path.exists() {
+            return Ok(0);
+        }
+
+        let capacity = max_files.min(1_000_000);
+        self.entries.reserve(capacity);
+
+        // Use ignore crate for gitignore-aware traversal
+        // This automatically respects .gitignore, .ignore, and parent directory ignore files
+        let walker = WalkBuilder::new(path)
+            .ignore(true)  // Look for .ignore files and respect gitignore
+            .build();
+
+        let file_paths: Vec<PathBuf> = walker
+            .filter_map(|e| e.ok())
+            .filter_map(|e| e.file_type()?.is_file().then(|| e.path().to_path_buf()))
+            .take(max_files)
+            .collect();
+
+        let count = file_paths.len();
+
+        // Use parallel processing for large file lists
         let entries: Vec<FileEntry> = if count > 1000 {
             file_paths
                 .par_iter()
