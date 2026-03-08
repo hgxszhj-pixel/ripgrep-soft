@@ -160,16 +160,19 @@ impl FileIndex {
     }
 
     /// Get the number of entries in the index
+    #[inline]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
     /// Check if the index is empty
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
     /// Get all entries in the index
+    #[inline]
     pub fn entries(&self) -> &[FileEntry] {
         &self.entries
     }

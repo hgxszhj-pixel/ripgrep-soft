@@ -19,7 +19,7 @@ const MAX_REGEX_CACHE_SIZE: usize = 1000;
 
 /// File size filter - min and max size in bytes
 /// Uses u64 with sentinel values for efficiency (no Option overhead)
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct SizeFilter {
     pub min_size: u64,      // 0 means no minimum
     pub max_size: u64,      // u64::MAX means no maximum
