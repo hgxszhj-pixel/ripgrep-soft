@@ -13,6 +13,10 @@ A high-performance file and content search tool for Windows, combining Everythin
 - **GUI Mode**: Modern Everything-style graphical interface
 - **Double-click to Play**: Open media files (video/audio) directly
 - **File Preview**: Preview text, images, and documents
+- **Auto-detect Media Players**: Automatically detects installed video players (VLC, PotPlayer, MPC-HC, MPV, etc.)
+- **Customizable Player**: Select your preferred media player in Settings
+- **Animated Icons**: Visual feedback with animated status icons (lightning bolt, spinning globe, rotating arrows)
+- **No Console Flash**: Clean startup without console window flicker
 
 ## Requirements
 
@@ -63,6 +67,9 @@ GUI features:
 - Results in the middle
 - File preview at bottom
 - Double-click to open files or play media
+- Animated status icons showing search/indexing progress
+- Settings panel for configuring media player preference
+- Auto-detection of installed video players (VLC, PotPlayer, MPC-HC, MPV, etc.)
 
 ### CLI Mode
 
@@ -116,6 +123,7 @@ turbo-search.exe history
 - **Arrow Keys**: Navigate results
 - **Double-click**: Open file / Play media
 - **Ctrl+C**: Copy selected path
+- **Ctrl+,** or **Settings button**: Open Settings panel
 
 ## File Support
 
@@ -123,9 +131,23 @@ turbo-search.exe history
 |------|---------|-------------------|
 | Text (.txt, .md, .rs, etc.) | ✅ | Open with default editor |
 | Images (.png, .jpg, .gif) | ✅ | Open with default app |
-| Video (.mp4, .avi, .mkv) | ❌ | Play with default player |
-| Audio (.mp3, .wav) | ❌ | Play with default player |
+| Video (.mp4, .avi, .mkv) | ❌ | Play with selected player |
+| Audio (.mp3, .wav) | ❌ | Play with selected player |
 | Documents (.pdf, .docx) | Info only | Open with default app |
+
+## Supported Media Players
+
+TurboSearch automatically detects the following video players:
+- VLC
+- PotPlayer (64-bit & 32-bit)
+- MPC-HC (64-bit & 32-bit)
+- MPV
+- SMPlayer
+- KMPlayer
+- Windows Media Player
+- GOM Player
+
+You can select your preferred player in Settings.
 
 ## Troubleshooting
 
