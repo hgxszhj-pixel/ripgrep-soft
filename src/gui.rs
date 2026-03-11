@@ -70,6 +70,113 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
+/// Known media players to detect on Windows
+const KNOWN_PLAYERS: &[(&str, &str)] = &[
+    ("VLC", "vlc.exe"),
+    ("PotPlayer", "PotPlayerMini64.exe"),
+    ("PotPlayer (32-bit)", "PotPlayer.exe"),
+    ("MPC-HC (64-bit)", "MPC-HC64.exe"),
+    ("MPC-HC (32-bit)", "MPC-HC.exe"),
+    ("MPV", "mpv.exe"),
+    ("SMPlayer", "smplayer.exe"),
+    ("KMPlayer", "KMPlayer.exe"),
+    ("Windows Media Player", "wmplayer.exe"),
+    ("GOM Player", "GOM.exe"),
+];
+
+/// Detect installed media players on the system
+#[cfg(windows)]
+fn detect_media_players() -> Vec<(String, String)> {
+    use std::collections::HashSet;
+    use std::env;
+
+    let mut found_players: Vec<(String, String)> = Vec::new();
+    let mut checked_paths: HashSet<String> = HashSet::new();
+
+    // Search paths: PATH + common installation directories
+    let mut search_dirs: Vec<std::path::PathBuf> = Vec::new();
+
+    // Add PATH directories
+    let path_var = env::var("PATH").unwrap_or_default();
+    search_dirs.extend(env::split_paths(&path_var));
+
+    // Add common installation directories
+    if let Ok(program_files) = env::var("ProgramFiles") {
+        search_dirs.push(program_files.into());
+    }
+    if let Ok(program_files_x86) = env::var("ProgramFiles(x86)") {
+        search_dirs.push(program_files_x86.into());
+    }
+    // Add common video player subdirectories
+    let common_player_dirs = [
+        "VideoLAN",
+        "Potplayer",
+        "MPC-HC",
+        "K-Lite Codec Pack",
+        "GOM",
+        "KMPlayer",
+        "smplayer",
+        "MPV",
+    ];
+    for dir in &common_player_dirs {
+        if let Ok(program_files) = env::var("ProgramFiles") {
+            search_dirs.push(std::path::PathBuf::from(&program_files).join(dir));
+        }
+        if let Ok(program_files_x86) = env::var("ProgramFiles(x86)") {
+            search_dirs.push(std::path::PathBuf::from(&program_files_x86).join(dir));
+        }
+    }
+
+    // Search for each player
+    for (name, exe_name) in KNOWN_PLAYERS {
+        for search_dir in &search_dirs {
+            if !search_dir.exists() {
+                continue;
+            }
+            // Check directly in search_dir
+            let exe_path = search_dir.join(exe_name);
+            if exe_path.exists() {
+                let path_str = exe_path.to_string_lossy().to_string();
+                if !checked_paths.contains(&path_str) {
+                    checked_paths.insert(path_str.clone());
+                    found_players.push((name.to_string(), path_str));
+                }
+            }
+            // Also check subdirectories (for players with versioned folders)
+            if let Ok(entries) = std::fs::read_dir(search_dir) {
+                for entry in entries.flatten() {
+                    let sub_path = entry.path();
+                    if sub_path.is_dir() {
+                        let exe_path = sub_path.join(exe_name);
+                        if exe_path.exists() {
+                            let path_str = exe_path.to_string_lossy().to_string();
+                            if !checked_paths.contains(&path_str) {
+                                checked_paths.insert(path_str.clone());
+                                found_players.push((name.to_string(), path_str));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Add system default as first option
+    if !found_players.is_empty() {
+        found_players.insert(0, ("System Default".to_string(), "default".to_string()));
+    }
+
+    found_players
+}
+
+/// Detect installed media players (non-Windows fallback)
+#[cfg(not(windows))]
+fn detect_media_players() -> Vec<(String, String)> {
+    vec![
+        ("System Default".to_string(), "xdg-open".to_string()),
+    ]
+}
+
 pub struct RipgrepApp {
     search_query: String,
     search_query_lower: String,
@@ -162,15 +269,25 @@ impl RipgrepApp {
             preview_loading: false,
             preview_path: None,
             preview_channel: None,
-            available_players: Vec::new(),
-            selected_player: None,
+            available_players: Self::detect_media_players(),
+            selected_player: Some("System Default".to_string()),
         };
 
         // Load settings from config file
         app.load_settings();
 
+        // Auto-select first detected player if available
+        if app.selected_player.is_none() && !app.available_players.is_empty() {
+            app.selected_player = Some(app.available_players[0].0.clone());
+        }
+
         app.index_channel = app.load_saved_state();
         app
+    }
+
+    /// Re-detect media players
+    fn detect_media_players() -> Vec<(String, String)> {
+        crate::gui::detect_media_players()
     }
 
     fn check_ripgrep_available() -> bool {
@@ -667,6 +784,35 @@ impl RipgrepApp {
     }
 
     /// Open file with system default player
+    fn open_with_player(path: &std::path::Path, player_path: &str) {
+        #[cfg(windows)]
+        {
+            use std::process::Command;
+            let path_str = path.to_string_lossy().to_string();
+
+            if player_path == "default" || player_path.is_empty() {
+                // Use system default
+                let _ = Command::new("cmd")
+                    .args(["/c", "start", "", &path_str])
+                    .spawn();
+            } else {
+                // Use specified player
+                let _ = Command::new(player_path)
+                    .arg(&path_str)
+                    .spawn();
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            use std::process::Command;
+            if player_path == "default" || player_path.is_empty() {
+                let _ = Command::new("xdg-open").arg(path).spawn();
+            } else {
+                let _ = Command::new(player_path).arg(path).spawn();
+            }
+        }
+    }
+
     fn open_with_default_player(path: &std::path::Path) {
         #[cfg(windows)]
         {
@@ -811,6 +957,45 @@ impl eframe::App for RipgrepApp {
 
                     ui.separator();
 
+                    // Media Player settings
+                    ui.label(egui::RichText::new("Media Player").strong());
+                    ui.horizontal(|ui| {
+                        ui.label("Video Player:");
+                        egui::ComboBox::from_id_salt("player_selector")
+                            .selected_text(self.selected_player.as_deref().unwrap_or("None"))
+                            .show_ui(ui, |ui| {
+                                for (name, _path) in &self.available_players {
+                                    ui.selectable_value(
+                                        &mut self.selected_player,
+                                        Some(name.clone()),
+                                        name,
+                                    );
+                                }
+                            });
+                    });
+
+                    // Show detected players count
+                    if !self.available_players.is_empty() {
+                        ui.label(egui::RichText::new(format!(
+                            "{} player(s) detected",
+                            self.available_players.len()
+                        )).small().color(egui::Color32::GRAY));
+                    } else {
+                        ui.label(egui::RichText::new("No players detected")
+                            .small()
+                            .color(egui::Color32::RED));
+                    }
+
+                    // Re-scan button
+                    if ui.button("Re-scan Players").clicked() {
+                        self.available_players = Self::detect_media_players();
+                        if self.selected_player.is_none() && !self.available_players.is_empty() {
+                            self.selected_player = Some(self.available_players[0].0.clone());
+                        }
+                    }
+
+                    ui.separator();
+
                     // Save and Close buttons
                     ui.horizontal(|ui| {
                         if ui.button("Save").clicked() {
@@ -828,7 +1013,12 @@ impl eframe::App for RipgrepApp {
         // Top toolbar
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("\u{1F50D}").size(28.0));
+                // Animated lightning bolt
+                let time = ctx.input(|i| i.time);
+                let frame = ((time * 6.0) as usize) % 4;
+                let bolt_frames = ["\u{26A1}", "\u{1F4A5}", "\u{26A1}", "\u{1F5E2}"];
+                ui.label(egui::RichText::new(bolt_frames[frame]).size(28.0));
+
                 ui.heading(egui::RichText::new("TurboSearch").strong().color(egui::Color32::from_rgb(0, 120, 212)));
                 ui.label(egui::RichText::new("File Search").small().color(egui::Color32::GRAY));
 
@@ -1114,7 +1304,18 @@ impl eframe::App for RipgrepApp {
                                         .frame(true))
                                     .clicked()
                                 {
-                                    Self::open_with_default_player(&entry.path);
+                                    // Get selected player path
+                                    let player_path = self.selected_player
+                                        .as_ref()
+                                        .and_then(|name| {
+                                            self.available_players
+                                                .iter()
+                                                .find(|(n, _)| n == name)
+                                                .map(|(_, p)| p.clone())
+                                        })
+                                        .unwrap_or_else(|| "default".to_string());
+
+                                    Self::open_with_player(&entry.path, &player_path);
                                 }
                             });
                         }
@@ -1138,24 +1339,47 @@ impl eframe::App for RipgrepApp {
 
         // Status bar
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
-            if self.is_indexing {
+            let time = ctx.input(|i| i.time);
+
+            if self.is_searching {
+                // Animated rotating globe for searching
+                let frame = ((time * 4.0) as usize) % 12;
+                let globe_frames = [
+                    "\u{1F30D}", "\u{1F30E}", "\u{1F30F}",
+                    "\u{1F310}", "\u{1F311}", "\u{1F312}",
+                    "\u{1F313}", "\u{1F314}", "\u{1F315}",
+                    "\u{1F316}", "\u{1F317}", "\u{1F318}",
+                ];
+                let globe = globe_frames[frame];
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("\u{1F50D} Indexing...").color(egui::Color32::from_rgb(64, 122, 204)));
+                    ui.label(egui::RichText::new(globe).size(16.0));
+                    ui.label(
+                        egui::RichText::new(format!("Searching... {} results", self.total_results))
+                            .color(egui::Color32::from_rgb(255, 183, 0)),
+                    );
                     ui.spinner();
-                    ui.label(egui::RichText::new(&self.progress_message).small().color(egui::Color32::GRAY));
+                });
+            } else if self.is_indexing {
+                // Animated arrows for indexing
+                let frame = ((time * 4.0) as usize) % 4;
+                let index_frames = ["\u{1F504}", "\u{1F501}", "\u{1F500}", "\u{1F501}"];
+                let index_icon = index_frames[frame];
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(index_icon).size(16.0));
+                    ui.label(
+                        egui::RichText::new(format!("Indexing... {}", self.progress_message))
+                            .color(egui::Color32::from_rgb(64, 122, 204)),
+                    );
+                    ui.spinner();
                 });
             } else {
                 ui.horizontal_wrapped(|ui| {
-                    let (status_icon, status_color, status_text) = if self.is_searching {
-                        ("\u{23F3}", egui::Color32::from_rgb(255, 183, 0),
-                         format!("Searching... {} results", self.total_results))
-                    } else {
-                        ("\u{2705}", egui::Color32::from_rgb(76, 175, 80),
-                         format!("Ready - {} files indexed", self.index.len()))
-                    };
-
-                    ui.label(egui::RichText::new(status_icon).size(14.0));
-                    ui.label(egui::RichText::new(&status_text).color(status_color).small());
+                    ui.label(egui::RichText::new("\u{2705}").size(14.0));
+                    ui.label(
+                        egui::RichText::new(format!("Ready - {} files indexed", self.index.len()))
+                            .color(egui::Color32::from_rgb(76, 175, 80))
+                            .small(),
+                    );
 
                     ui.separator();
 
@@ -1166,7 +1390,7 @@ impl eframe::App for RipgrepApp {
                         egui::Color32::from_rgb(156, 39, 176)
                     };
                     ui.label(
-                        egui::RichText::new(format!("[{}]", mode_text))
+                        egui::RichText::new(format!("[{mode_text}]"))
                             .small()
                             .color(egui::Color32::WHITE)
                             .background_color(mode_color)
@@ -1175,7 +1399,7 @@ impl eframe::App for RipgrepApp {
                     ui.label(egui::RichText::new(format!("{} results", self.displayed_results.len())).small());
 
                     if let Some(duration) = self.last_search_duration {
-                        ui.label(egui::RichText::new(format!("{} ms", duration)).small().color(egui::Color32::GRAY));
+                        ui.label(egui::RichText::new(format!("{duration} ms")).small().color(egui::Color32::GRAY));
                     }
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1225,12 +1449,61 @@ fn load_chinese_fonts() -> FontDefinitions {
     fonts
 }
 
+/// Create a simple 16x16 colored icon programmatically
+fn create_simple_icon() -> egui::IconData {
+    let size = 16;
+    let mut rgba = vec![0u8; size * size * 4];
+
+    // Create a blue to purple gradient with search icon shape
+    for y in 0..size {
+        for x in 0..size {
+            let idx = (y * size + x) * 4;
+
+            // Circle in center (search glass)
+            let cx = x as f32 - 7.0;
+            let cy = y as f32 - 7.0;
+            let dist = (cx * cx + cy * cy).sqrt();
+
+            if dist < 5.0 {
+                // Blue gradient circle
+                let t = y as f32 / size as f32;
+                rgba[idx] = (33.0 + t * 123.0) as u8;     // R
+                rgba[idx + 1] = (150.0 - t * 39.0) as u8; // G
+                rgba[idx + 2] = (243.0 - t * 67.0) as u8; // B
+                rgba[idx + 3] = 255; // A
+            } else if x > 10 && y > 10 {
+                // Handle (bottom right)
+                rgba[idx] = 33;     // R
+                rgba[idx + 1] = 150; // G
+                rgba[idx + 2] = 243; // B
+                rgba[idx + 3] = 255; // A
+            } else {
+                // Transparent
+                rgba[idx] = 0;
+                rgba[idx + 1] = 0;
+                rgba[idx + 2] = 0;
+                rgba[idx + 3] = 0;
+            }
+        }
+    }
+
+    egui::IconData {
+        rgba,
+        width: size as u32,
+        height: size as u32,
+    }
+}
+
 pub fn run_gui() -> Result<(), eframe::Error> {
+    // Create a simple colored icon programmatically
+    let icon_data = create_simple_icon();
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1200.0, 800.0])
             .with_min_inner_size([800.0, 600.0])
-            .with_title("TurboSearch - File Search"),
+            .with_title("TurboSearch - File Search")
+            .with_icon(icon_data),
         ..Default::default()
     };
 
