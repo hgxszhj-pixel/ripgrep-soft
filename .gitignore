@@ -1,0 +1,22 @@
+# Build artifacts
+target/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.log
+
+# Claude Code local settings
+.claude/
+
+# Project planning (internal)
+.planning/
