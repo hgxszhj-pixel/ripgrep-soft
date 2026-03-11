@@ -1,0 +1,100 @@
+@startuml TurboSearch Component Interaction
+
+!theme plain
+skinparam rectangle {
+    BackgroundColor #E1F5FE
+    BorderColor #0277BD
+    RoundCorner 10
+    FontSize 11
+}
+skinparam database {
+    BackgroundColor #FFF3E0
+    BorderColor #E65100
+}
+skinparam queue {
+    BackgroundColor #F3E5F5
+    BorderColor #7B1FA2
+}
+skinparam actor {
+    BackgroundColor #E8F5E9
+    BorderColor #2E7D32
+}
+skinparam arrow {
+    Thickness 1.5
+    Color #37474F
+}
+
+title TurboSearch Component Interaction Diagram
+
+actor User as U
+
+rectangle "GUI Layer" {
+    rectangle RipgrepApp as GUI {
+    }
+}
+
+rectangle "Search Engine" as SE {
+    rectangle Searcher as S {
+    }
+    rectangle ContentSearcher as CS {
+    }
+    queue "Regex Cache" as RC {
+        note right: DashMap\nlock-free reads
+    }
+}
+
+rectangle "Index Module" as IM {
+    database FileIndex as FI {
+    }
+    rectangle FileEntry as FE {
+    }
+}
+
+rectangle "File System" as FS {
+    database "OS Files" as Files {
+    }
+    rectangle MFTReader as MFT {
+    }
+}
+
+U -> GUI : 1. Select Directory
+GUI -> IM : 2. Build Index
+IM -> FS : 3. Traverse Files
+FS -> IM : 4. Return Files
+IM -> FI : 5. Store Entries
+FI -> FE : 6. Contains
+
+U -> GUI : 7. Enter Query
+GUI -> SE : 8. Execute Search
+
+SE -> RC : 9. Get Cached Regex
+alt Cache Hit
+    RC -> SE : Return Cached
+else Cache Miss
+    SE -> RC : 10. Compile & Store
+end
+
+SE -> FI : 11. Query Index
+FI -> SE : 12. Return Results
+
+SE -> GUI : 13. Display Results
+
+U -> GUI : 14. Select File
+GUI -> FS : 15. Read File
+FS -> GUI : 16. File Content
+
+note right of RC
+  Memory Optimizations:
+  - DashMap instead of Mutex
+  - Pre-compute lowercase
+  - u64 sentinel for SizeFilter
+end note
+
+note right of FI
+  Data Structure:
+  - FileIndex (Aggregate Root)
+  - FileEntry (Entity)
+  - Vec<FileEntry> entries
+end note
+
+@enduml

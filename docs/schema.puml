@@ -1,0 +1,151 @@
+@startuml TurboSearch Data Schema Model
+
+!theme plain
+skinparam packageStyle rectangle
+skinparam classAttributeIconSize 0
+skinparam stereotypeCBackgroundColor #LightBlue
+
+' ==================== 核心数据模型 ====================
+
+package "索引模块" {
+    class FileEntry <<Entity>> {
+        +path: PathBuf
+        +name: String
+        +size: u64
+        +modified: SystemTime
+    }
+
+    class FileIndex <<Aggregate>> {
+        +path: PathBuf
+        +modified: SystemTime
+        +entries: Vec<FileEntry>
+    }
+
+    FileIndex "1" --> "*" FileEntry : contains
+}
+
+package "搜索模块" {
+    class SizeFilter <<ValueObject>> {
+        +min_size: u64
+        +max_size: u64
+    }
+
+    class SearchQuery <<Entity>> {
+        +pattern: String
+        +case_sensitive: bool
+        +regex: bool
+        +offset: usize
+        +limit: usize
+        +size_filter: SizeFilter
+    }
+
+    class ContentSearchQuery <<Entity>> {
+        +pattern: String
+        +case_sensitive: bool
+        +regex: bool
+        +max_context: usize
+        +size_filter: SizeFilter
+    }
+
+    class ContentMatch <<ValueObject>> {
+        +file_path: PathBuf
+        +line_number: usize
+        +line_content: String
+        +match_text: String
+    }
+
+    SearchQuery "1" --> "1" SizeFilter : has
+    ContentSearchQuery "1" --> "1" SizeFilter : has
+    ContentSearchQuery "1" --> "*" ContentMatch : produces
+}
+
+package "历史模块" {
+    class SearchHistoryEntry <<Entity>> {
+        +query: String
+        +search_path: PathBuf
+        +timestamp: SystemTime
+        +result_count: usize
+    }
+
+    class SearchHistory <<Aggregate>> {
+        +entries: Vec<SearchHistoryEntry>
+    }
+
+    SearchHistory "1" --> "*" SearchHistoryEntry : contains
+}
+
+package "MFT模块" {
+    class MftFileEntry <<Entity>> {
+        +path: PathBuf
+        +name: String
+        +size: u64
+        +is_directory: bool
+    }
+
+    class MftReader <<Service>> {
+        +volume: String
+    }
+}
+
+package "CLI模块" {
+    class Cli <<Entity>> {
+        +command: Option<Commands>
+        +verbose: bool
+        +quiet: bool
+        +gui: bool
+    }
+
+    enum Commands <<ValueObject>> {
+        Search{path, pattern, content, regex, case_sensitive, context, size}
+        Index{path, max_files}
+    }
+
+    Cli "1" --> "1" Commands : has
+}
+
+package "GUI模块" {
+    class RipgrepApp <<AggregateRoot>> {
+        +search_query: String
+        +index: Arc<FileIndex>
+        +search_path: PathBuf
+        +displayed_results: Vec<FileEntry>
+        +streaming_matches: Vec<PathBuf>
+        +preview_content: String
+        +is_indexing: bool
+        +is_searching: bool
+    }
+
+    enum SearchMode <<ValueObject>> {
+        Filename
+        Content
+        Regex
+    }
+
+    enum AppTheme <<ValueObject>> {
+        Light
+        Dark
+    }
+
+    RipgrepApp "1" --> "1" FileIndex : indexes
+    RipgrepApp "1" --> "1" SearchMode : uses
+    RipgrepApp "1" --> "1" AppTheme : uses
+}
+
+' ==================== 关系汇总 ====================
+
+note bottom of FileEntry
+  Entity: 具有唯一标识（path）
+  用于表示单个文件
+end note
+
+note bottom of SizeFilter
+  Value Object: 不可变
+  用于搜索结果的过滤
+end note
+
+note bottom of SearchHistory
+  Aggregate: 边界内实体一致性
+  管理搜索历史生命周期
+end note
+
+@enduml

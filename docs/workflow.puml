@@ -1,0 +1,76 @@
+@startuml TurboSearch Workflow
+
+title TurboSearch Search & Index Workflow
+
+actor User
+participant GUI
+participant Searcher
+participant ContentSearcher
+participant FileIndex
+participant "OS/FileSystem"
+
+== Indexing Process ==
+
+User -> GUI: 选择文件夹路径
+GUI -> FileIndex: walk_directory_limited()
+FileIndex -> "OS/FileSystem": 遍历目录
+"OS/FileSystem" -> FileIndex: 返回文件列表
+FileIndex -> FileIndex: 创建FileEntry列表
+FileIndex -> GUI: 返回索引结果
+
+== Search Process (Filename) ==
+
+User -> GUI: 输入搜索关键词
+GUI -> Searcher: search(query, index)
+alt 模糊搜索
+    Searcher -> Searcher: fuzzy_search()
+    Searcher -> Searcher: SkimMatcherV2匹配
+else 正则搜索
+    Searcher -> Searcher: regex_search()
+    Searcher -> Searcher: get_cached_regex()\n(使用DashMap缓存)
+else Glob搜索
+    Searcher -> Searcher: glob_search()
+end
+Searcher -> GUI: 返回匹配的FileEntry列表
+GUI -> User: 显示搜索结果
+
+== Search Process (Content) ==
+
+User -> GUI: 选择内容搜索模式
+GUI -> ContentSearcher: search(query, path)
+ContentSearcher -> "OS/FileSystem": 打开文件
+loop 逐行读取
+    ContentSearcher -> ContentSearcher: 匹配行
+end
+ContentSearcher -> GUI: 返回ContentMatch列表
+GUI -> User: 显示匹配内容和行号
+
+== Preview Process ==
+
+User -> GUI: 选择文件预览
+GUI -> "OS/FileSystem": read_file_content()
+alt 文本文件
+    "OS/FileSystem" --> GUI: 返回文本内容
+else 二进制文件
+    "OS/FileSystem" --> GUI: 返回文件信息
+end
+GUI -> GUI: highlighted_content = 语法高亮
+GUI -> User: 显示预览
+
+== Memory Optimizations ==
+
+note right of Searcher
+  内存优化:
+  1. DashMap缓存Regex
+  2. 预计算to_lowercase
+  3. SizeFilter使用u64哨兵值
+end note
+
+note right of GUI
+  内存优化:
+  1. 移除重复HashSet
+  2. 限制结果显示数量
+  3. 流式处理搜索结果
+end note
+
+@enduml

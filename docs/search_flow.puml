@@ -1,0 +1,81 @@
+@startuml TurboSearch Search Workflow
+
+!theme plain
+skinparam activity {
+    BackgroundColor #FFF3E0
+    BorderColor #E65100
+    ArrowColor #E65100
+}
+skinparam swimlane {
+    BackgroundColor #F5F5F5
+    BorderColor #757575
+    TitleBackgroundColor #263238
+    TitleFontColor #FFFFFF
+}
+
+|User|
+start
+:Open Application;
+:Select Search Directory;
+
+|System|
+:Initialize FileIndex;
+:Build Index from Directory;
+
+|User|
+:Input Search Keyword;
+:Select Search Mode;
+
+|Search Module|
+switch (Search Mode)
+case (Filename)
+    :Execute Fuzzy Search;
+    note right: SkimMatcherV2\nPre-compute lowercase
+case (Regex)
+    :Check Cache;
+    note right: DashMap for\nconcurrent reads
+    if (Cache Hit?) then (yes)
+        :Use Cached Regex;
+    else (no)
+        :Compile Regex;
+        :Store in Cache;
+    endif
+case (Content)
+    :Read Files in Parallel;
+    :Match Line by Line;
+case (Glob)
+    :Convert Glob to Regex;
+    :Execute Regex;
+endswitch
+
+|Index Module|
+:Filter by SizeFilter;
+note right: min_size/max_size\nu64 sentinel values
+:Apply Limit;
+note right: max 500 results
+
+|UI Layer|
+:Stream Results;
+note right: Update display\nincrementally
+
+|User|
+:View Results;
+if (Select File) then (yes)
+    |Preview Module|
+    :Load File Content;
+    :Detect File Type;
+    if (Text) then (yes)
+        :Syntax Highlight;
+    else if (Image) then (yes)
+        :Generate Thumbnail;
+    else if (Video) then (yes)
+        :Extract Metadata;
+    else
+        :Show File Info;
+    endif
+endif
+
+|User|
+stop
+
+@enduml

@@ -1,0 +1,136 @@
+@startuml TurboSearch Data Model
+
+' ==================== 样式设置 ====================
+!theme plain
+hide stereotypes
+skinparam classFontSize 12
+skinparam attributeFontSize 11
+skinparam arrowFontSize 10
+skinparam packageFontSize 14
+
+' ==================== 图例 ====================
+legend right
+  |<&box> Entity 实体|
+  |<&box> Value Object 值对象|
+  |<&box> Service 服务|
+  |<&box> Aggregate 聚合根|
+end legend
+
+' ==================== 核心数据结构 ====================
+
+package "Core Data Structures" {
+
+    ' FileEntry - 文件实体
+    class "FileEntry" as FE {
+        +path: PathBuf
+        +name: String
+        +size: u64
+        +modified: SystemTime
+    }
+
+    ' FileIndex - 索引聚合根
+    class "FileIndex" as FI {
+        +path: PathBuf
+        +modified: SystemTime
+        +entries: Vec<FileEntry>
+    }
+
+    ' SizeFilter - 值对象
+    class "SizeFilter" as SF {
+        +min_size: u64
+        +max_size: u64
+    }
+
+    ' SearchQuery - 搜索查询
+    class "SearchQuery" as SQ {
+        +pattern: String
+        +case_sensitive: bool
+        +regex: bool
+        +offset: usize
+        +limit: usize
+        +size_filter: SizeFilter
+    }
+
+    ' ContentSearchQuery - 内容搜索
+    class "ContentSearchQuery" as CSQ {
+        +pattern: String
+        +case_sensitive: bool
+        +regex: bool
+        +max_context: usize
+        +size_filter: SizeFilter
+    }
+
+    ' ContentMatch - 匹配结果
+    class "ContentMatch" as CM {
+        +file_path: PathBuf
+        +line_number: usize
+        +line_content: String
+        +match_text: String
+    }
+
+    ' 关系
+    FI "1" *-- "*" FE : contains
+    SQ "1" o-- "1" SF : filter
+    CSQ "1" o-- "1" SF : filter
+    CSQ "1" *-- "*" CM : produces
+}
+
+' ==================== 支持结构 ====================
+
+package "Supporting Structures" {
+
+    class "SearchHistoryEntry" as SHE {
+        +query: String
+        +search_path: PathBuf
+        +timestamp: SystemTime
+        +result_count: usize
+    }
+
+    class "SearchHistory" as SH {
+        +entries: Vec<SearchHistoryEntry>
+    }
+
+    class "MftFileEntry" as MFE {
+        +path: PathBuf
+        +name: String
+        +size: u64
+        +is_directory: bool
+    }
+
+    enum "SearchMode" as SM {
+        Filename
+        Content
+        Regex
+    }
+
+    enum "AppTheme" as AT {
+        Light
+        Dark
+    }
+
+    SH "1" *-- "*" SHE : contains
+}
+
+' ==================== 接口定义 ====================
+
+together {
+    interface "ISearchService" as ISS {
+        +search(query, index)
+    }
+
+    interface "IContentSearchService" as ICSS {
+        +search(query, path)
+    }
+
+    interface "IIndexPersistence" as IIP {
+        +save(index, path)
+        +load(path)
+    }
+}
+
+' ==================== 依赖关系 ====================
+
+FI .->. IIP
+SH .->. IIP
+
+@enduml
