@@ -185,3 +185,4 @@ MIT
 
 hgxszhj &lt;hgxszhj@gmail.com&gt;
 # turbo-search
+# ripgrep-soft
