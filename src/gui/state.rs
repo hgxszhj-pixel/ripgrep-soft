@@ -43,6 +43,80 @@ impl SearchMode {
     }
 }
 
+/// A saved favorite search configuration
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FavoriteSearch {
+    pub id: String,
+    pub name: String,
+    pub search_pattern: String,
+    pub search_path: String,
+    pub search_mode: SearchMode,
+    pub use_regex: bool,
+    pub use_glob: bool,
+    pub case_sensitive: bool,
+    pub size_filter: String,
+    pub created_at: u64,
+}
+
+impl FavoriteSearch {
+    pub fn new(
+        name: String,
+        search_pattern: String,
+        search_path: String,
+        search_mode: SearchMode,
+        use_regex: bool,
+        use_glob: bool,
+        case_sensitive: bool,
+        size_filter: String,
+    ) -> Self {
+        let id = format!("fav_{}", std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis());
+        let created_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        Self {
+            id,
+            name,
+            search_pattern,
+            search_path,
+            search_mode,
+            use_regex,
+            use_glob,
+            case_sensitive,
+            size_filter,
+            created_at,
+        }
+    }
+}
+
+/// Collection of favorite searches
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct Favorites {
+    pub favorites: Vec<FavoriteSearch>,
+}
+
+impl Favorites {
+    pub fn new() -> Self {
+        Self { favorites: Vec::new() }
+    }
+
+    pub fn add(&mut self, favorite: FavoriteSearch) {
+        self.favorites.push(favorite);
+    }
+
+    pub fn remove(&mut self, id: &str) {
+        self.favorites.retain(|f| f.id != id);
+    }
+
+    pub fn get(&self, id: &str) -> Option<&FavoriteSearch> {
+        self.favorites.iter().find(|f| f.id == id)
+    }
+}
+
 /// Application settings that persist across sessions
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AppSettings {
