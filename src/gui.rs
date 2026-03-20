@@ -7,7 +7,7 @@ pub mod ui_components;
 
 use crate::index::{FileEntry, FileIndex};
 use crate::search::{SearchQuery, Searcher, SizeFilter};
-use crate::gui::state::{AppTheme, SearchMode, FileCategory, PaginationState, ITEMS_PER_PAGE_OPTIONS};
+use crate::gui::state::{AppTheme, SearchMode, FileCategory, PaginationState, ITEMS_PER_PAGE_OPTIONS, FavoriteSearch, Favorites};
 use eframe::egui::{self, FontDefinitions, FontData};
 use std::path::PathBuf;
 use std::sync::{Arc, mpsc};
@@ -221,6 +221,9 @@ pub struct RipgrepApp {
     selected_player: Option<String>,
     // Pagination state
     pagination: PaginationState,
+    // Favorites
+    favorites: Favorites,
+    show_favorites_dropdown: bool,
 }
 
 impl Default for RipgrepApp {
@@ -274,10 +277,17 @@ impl RipgrepApp {
             available_players: Self::detect_media_players(),
             selected_player: Some("System Default".to_string()),
             pagination: PaginationState::new(100),
+            favorites: Favorites::new(),
+            show_favorites_dropdown: false,
         };
 
         // Load settings from config file
         app.load_settings();
+        // Load favorites
+        app.favorites = app.load_favorites();
+
+        // Load favorites
+        app.favorites = app.load_favorites();
 
         // Auto-select first detected player if available
         if app.selected_player.is_none() && !app.available_players.is_empty() {
@@ -330,6 +340,75 @@ impl RipgrepApp {
                 }
             }
         }
+    }
+
+    /// Load favorites from file
+    fn load_favorites(&self) -> Favorites {
+        if let Some(config_dir) = Self::get_config_dir() {
+            let favorites_file = config_dir.join("favorites.json");
+            if let Ok(json_str) = std::fs::read_to_string(&favorites_file) {
+                if let Ok(favorites) = serde_json::from_str(&json_str) {
+                    return favorites;
+                }
+            }
+        }
+        Favorites::new()
+    }
+
+    /// Save favorites to file
+    fn save_favorites(&self) {
+        if let Some(config_dir) = Self::get_config_dir() {
+            if let Err(e) = std::fs::create_dir_all(&config_dir) {
+                eprintln!("Failed to create config directory: {}", e);
+                return;
+            }
+            let favorites_file = config_dir.join("favorites.json");
+            if let Ok(json_str) = serde_json::to_string_pretty(&self.favorites) {
+                if let Err(e) = std::fs::write(&favorites_file, json_str) {
+                    eprintln!("Failed to save favorites: {}", e);
+                }
+            }
+        }
+    }
+
+    /// Add current search to favorites
+    fn add_to_favorites(&mut self, name: String) {
+        let favorite = FavoriteSearch::new(
+            name,
+            self.search_query.clone(),
+            self.search_path.to_string_lossy().to_string(),
+            self.search_mode,
+            self.use_regex,
+            self.use_glob,
+            self.case_sensitive,
+            self.size_filter.clone(),
+        );
+        self.favorites.add(favorite);
+        self.save_favorites();
+    }
+
+    /// Apply a favorite search
+    fn apply_favorite(&mut self, favorite: &FavoriteSearch) {
+        self.search_query = favorite.search_pattern.clone();
+        self.search_path = PathBuf::from(&favorite.search_path);
+        self.search_path_text = favorite.search_path.clone();
+        self.search_mode = favorite.search_mode;
+        self.use_regex = favorite.use_regex;
+        self.use_glob = favorite.use_glob;
+        self.case_sensitive = favorite.case_sensitive;
+        self.size_filter = favorite.size_filter.clone();
+
+        // Trigger search if we have valid inputs
+        if !self.search_query.is_empty() && !self.search_path.as_os_str().is_empty() && !self.is_indexing {
+            self.last_query.clear();
+            self.perform_search();
+        }
+    }
+
+    /// Remove a favorite
+    fn remove_favorite(&mut self, id: &str) {
+        self.favorites.remove(id);
+        self.save_favorites();
     }
 
     /// Load settings from JSON file
@@ -1254,6 +1333,43 @@ impl eframe::App for RipgrepApp {
                         self.perform_search();
                     }
                 }
+
+                // Favorites button
+                ui.separator();
+                egui::ComboBox::from_id_salt("favorites")
+                    .selected_text("\u{2B50} Favorites")
+                    .show_ui(ui, |ui| {
+                        // Clone favorites to avoid borrow issues
+                        let favorites_clone: Vec<FavoriteSearch> = self.favorites.favorites.clone();
+
+                        if favorites_clone.is_empty() {
+                            ui.label(egui::RichText::new("No favorites yet").small().color(egui::Color32::GRAY));
+                        } else {
+                            for fav in favorites_clone {
+                                let icon = if fav.search_mode == SearchMode::Content {
+                                    "\u{1F4DD}" // Document for content search
+                                } else {
+                                    "\u{1F4C1}" // Folder for filename search
+                                };
+                                let label = format!("{} {}", icon, fav.name);
+                                if ui.button(label).clicked() {
+                                    self.apply_favorite(&fav);
+                                    self.show_favorites_dropdown = false;
+                                }
+                            }
+                            ui.separator();
+                        }
+
+                        // Add to favorites option
+                        if ui.button("+ Add Current Search").clicked() {
+                            // Show a simple dialog by setting a flag
+                            // For simplicity, we'll use the search query as name
+                            if !self.search_query.is_empty() {
+                                let name = format!("Search: {}", self.search_query);
+                                self.add_to_favorites(name);
+                            }
+                        }
+                    });
 
                 ui.separator();
 
