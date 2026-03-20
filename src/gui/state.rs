@@ -159,6 +159,136 @@ impl FileCategory {
     }
 }
 
+/// Pagination state for search results
+#[derive(Clone, Debug, Default)]
+pub struct PaginationState {
+    pub current_page: usize,      // Current page number (1-based)
+    pub items_per_page: usize,    // Number of items per page
+    pub total_items: usize,       // Total number of items
+}
+
+impl PaginationState {
+    /// Create a new pagination state
+    pub fn new(items_per_page: usize) -> Self {
+        Self {
+            current_page: 1,
+            items_per_page,
+            total_items: 0,
+        }
+    }
+
+    /// Calculate total number of pages
+    pub fn total_pages(&self) -> usize {
+        if self.total_items == 0 {
+            return 1;
+        }
+        (self.total_items + self.items_per_page - 1) / self.items_per_page
+    }
+
+    /// Get offset for current page (0-based)
+    pub fn offset(&self) -> usize {
+        (self.current_page.saturating_sub(1)) * self.items_per_page
+    }
+
+    /// Get limit for current page
+    pub fn limit(&self) -> usize {
+        self.items_per_page
+    }
+
+    /// Update pagination with new total
+    pub fn update_total(&mut self, total: usize) {
+        self.total_items = total;
+        // Adjust current page if it's now out of bounds
+        if self.current_page > self.total_pages() {
+            self.current_page = self.total_pages().max(1);
+        }
+    }
+
+    /// Check if pagination is needed
+    pub fn needs_pagination(&self) -> bool {
+        self.total_items > self.items_per_page
+    }
+
+    /// Go to next page
+    pub fn next_page(&mut self) {
+        if self.current_page < self.total_pages() {
+            self.current_page += 1;
+        }
+    }
+
+    /// Go to previous page
+    pub fn prev_page(&mut self) {
+        if self.current_page > 1 {
+            self.current_page -= 1;
+        }
+    }
+
+    /// Go to first page
+    pub fn first_page(&mut self) {
+        self.current_page = 1;
+    }
+
+    /// Go to last page
+    pub fn last_page(&mut self) {
+        self.current_page = self.total_pages().max(1);
+    }
+
+    /// Go to specific page (clamped to valid range)
+    pub fn go_to_page(&mut self, page: usize) {
+        let target = page.clamp(1, self.total_pages().max(1));
+        self.current_page = target;
+    }
+
+    /// Get visible page numbers for pagination UI
+    /// Shows surrounding pages around current page
+    pub fn get_visible_pages(&self, visible_count: usize) -> Vec<usize> {
+        let total = self.total_pages().max(1);
+        let current = self.current_page;
+
+        if total <= visible_count {
+            return (1..=total).collect();
+        }
+
+        let half = visible_count / 2;
+        let mut start = current.saturating_sub(half);
+        let end = (start + visible_count).min(total);
+
+        // Adjust if we're near the end
+        if end - start < visible_count {
+            start = end.saturating_sub(visible_count);
+        }
+
+        // Always include first and last page
+        let mut pages = Vec::new();
+
+        // Add first page and ellipsis if needed
+        if start > 1 {
+            pages.push(1);
+            if start > 2 {
+                // Ellipsis
+            }
+        }
+
+        // Add middle pages
+        for p in start..=end {
+            pages.push(p);
+        }
+
+        // Add ellipsis and last page if needed
+        if end < total {
+            if end < total - 1 {
+                // Ellipsis
+            }
+            pages.push(total);
+        }
+
+        pages
+    }
+}
+
+/// Available items per page options
+pub const ITEMS_PER_PAGE_OPTIONS: &[usize] = &[50, 100, 200, 500];
+
 /// Size filter helper
 pub fn parse_size_filter(filter: &str) -> Option<(u64, u64)> {
     let filter = filter.trim();

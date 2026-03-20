@@ -7,7 +7,7 @@ pub mod ui_components;
 
 use crate::index::{FileEntry, FileIndex};
 use crate::search::{SearchQuery, Searcher, SizeFilter};
-use crate::gui::state::{AppTheme, SearchMode, FileCategory};
+use crate::gui::state::{AppTheme, SearchMode, FileCategory, PaginationState, ITEMS_PER_PAGE_OPTIONS};
 use eframe::egui::{self, FontDefinitions, FontData};
 use std::path::PathBuf;
 use std::sync::{Arc, mpsc};
@@ -219,6 +219,8 @@ pub struct RipgrepApp {
     preview_channel: Option<mpsc::Receiver<String>>,
     available_players: Vec<(String, String)>,
     selected_player: Option<String>,
+    // Pagination state
+    pagination: PaginationState,
 }
 
 impl Default for RipgrepApp {
@@ -271,6 +273,7 @@ impl RipgrepApp {
             preview_channel: None,
             available_players: Self::detect_media_players(),
             selected_player: Some("System Default".to_string()),
+            pagination: PaginationState::new(100),
         };
 
         // Load settings from config file
@@ -512,6 +515,36 @@ impl RipgrepApp {
     }
 
     /// Check for completed search results
+    /// Update displayed results text based on current page
+    fn update_displayed_results_text(&mut self) {
+        self.displayed_results_text.clear();
+
+        let offset = self.pagination.offset();
+        let limit = self.pagination.limit();
+
+        // Only compute display strings for current page
+        for entry in self.displayed_results.iter().skip(offset).take(limit) {
+            let file_name = entry
+                .path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+            let path_str = entry.path.to_string_lossy().to_string();
+            self.displayed_results_text.push(format!("{} | {}", file_name, path_str));
+        }
+    }
+
+    /// Handle pagination changes
+    fn handle_page_change(&mut self) {
+        // Clear selection when changing page
+        self.selected_index = None;
+        self.preview_content.clear();
+
+        // Update displayed results for new page
+        self.update_displayed_results_text();
+    }
+
     fn check_search_complete(&mut self) {
         if self.is_searching {
             if let Some(rx) = self.search_channel.take() {
@@ -521,6 +554,10 @@ impl RipgrepApp {
                         self.displayed_results = results;
                         self.total_results = self.displayed_results.len();
                         self.is_searching = false;
+
+                        // Update pagination state
+                        self.pagination.update_total(self.total_results);
+                        self.pagination.current_page = 1;
 
                         // Calculate duration
                         if let Some(start) = self.search_start_time.take() {
@@ -534,18 +571,8 @@ impl RipgrepApp {
                             self.last_search_duration.unwrap_or(0)
                         );
 
-                        // Pre-compute display strings
-                        self.displayed_results_text.clear();
-                        for entry in &self.displayed_results {
-                            let file_name = entry
-                                .path
-                                .file_name()
-                                .and_then(|n| n.to_str())
-                                .map(|s| s.to_string())
-                                .unwrap_or_default();
-                            let path_str = entry.path.to_string_lossy().to_string();
-                            self.displayed_results_text.push(format!("{} | {}", file_name, path_str));
-                        }
+                        // Pre-compute display strings for current page only
+                        self.update_displayed_results_text();
                     }
                     Err(std::sync::mpsc::TryRecvError::Empty) => {
                         // Still searching, put channel back
@@ -665,6 +692,74 @@ impl RipgrepApp {
         self.highlighted_content = None;
         self.last_query.clear();
         self.search_channel = None;
+        // Reset pagination
+        self.pagination.current_page = 1;
+        self.pagination.total_items = 0;
+    }
+
+    /// Render pagination controls
+    fn render_pagination(&mut self, ui: &mut egui::Ui) {
+        let total_pages = self.pagination.total_pages();
+        let current_page = self.pagination.current_page;
+
+        ui.horizontal(|ui| {
+            // First page button
+            if ui.button("<< First").clicked() {
+                self.pagination.first_page();
+                self.handle_page_change();
+            }
+
+            // Previous page button
+            if ui.button("< Prev").clicked() {
+                self.pagination.prev_page();
+                self.handle_page_change();
+            }
+
+            // Page info
+            ui.label(egui::RichText::new(format!("Page {}/{} ", current_page, total_pages)).strong());
+
+            // Next page button
+            if ui.button("Next >").clicked() {
+                self.pagination.next_page();
+                self.handle_page_change();
+            }
+
+            // Last page button
+            if ui.button("Last >>").clicked() {
+                self.pagination.last_page();
+                self.handle_page_change();
+            }
+
+            ui.separator();
+
+            // Items per page selector
+            ui.label("Per page:");
+            let mut current_per_page = self.pagination.items_per_page;
+            egui::ComboBox::from_id_salt("items_per_page")
+                .selected_text(format!("{}", current_per_page))
+                .show_ui(ui, |ui| {
+                    for &per_page in ITEMS_PER_PAGE_OPTIONS {
+                        if ui.selectable_value(&mut current_per_page, per_page, format!("{}", per_page)).clicked() {
+                            self.pagination.items_per_page = per_page;
+                            self.pagination.current_page = 1; // Reset to first page
+                            self.handle_page_change();
+                        }
+                    }
+                });
+        });
+
+        // Quick page jump
+        ui.horizontal(|ui| {
+            ui.label("Go to page:");
+            let mut page_input = format!("{}", current_page);
+            if ui.add(egui::TextEdit::singleline(&mut page_input).desired_width(60.0)).lost_focus() {
+                if let Ok(page) = page_input.parse::<usize>() {
+                    self.pagination.go_to_page(page);
+                    self.handle_page_change();
+                }
+            }
+            ui.label(format!("(1-{})", total_pages));
+        });
     }
 
     fn apply_theme(&self, ctx: &egui::Context) {
@@ -1221,15 +1316,34 @@ impl eframe::App for RipgrepApp {
 
         // Main content area
         egui::CentralPanel::default().show(ctx, |ui| {
+            // Pagination controls at the top of results
+            if self.pagination.needs_pagination() {
+                self.render_pagination(ui);
+                ui.separator();
+            }
+
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    let max_display = self.max_filename_results.min(self.displayed_results.len());
+                    // Calculate pagination bounds
+                    let offset = if self.pagination.needs_pagination() {
+                        self.pagination.offset()
+                    } else {
+                        0
+                    };
+                    let limit = if self.pagination.needs_pagination() {
+                        self.pagination.limit()
+                    } else {
+                        self.displayed_results.len()
+                    };
+
+                    let max_display = limit.min(self.displayed_results.len().saturating_sub(offset));
 
                     for idx in 0..max_display {
-                        let is_selected = self.selected_index == Some(idx);
+                        let actual_idx = offset + idx;
+                        let is_selected = self.selected_index == Some(actual_idx);
 
-                        if let Some(entry) = self.displayed_results.get(idx) {
+                        if let Some(entry) = self.displayed_results.get(actual_idx) {
                             let file_name = entry
                                 .path
                                 .file_name()
@@ -1244,12 +1358,13 @@ impl eframe::App for RipgrepApp {
                             let category = FileCategory::from_extension(ext);
                             let icon = category.icon();
 
-                            let display_with_icon = format!("{}  {}", icon, file_name);
+                            // Display with index number
+                            let display_with_icon = format!("{}. {}  {}", actual_idx + 1, icon, file_name);
 
                             let response = ui.selectable_label(is_selected, &display_with_icon);
 
                             if response.clicked() {
-                                self.selected_index = Some(idx);
+                                self.selected_index = Some(actual_idx);
                                 self.preview_content = String::new();
                             }
 
