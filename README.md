@@ -17,6 +17,8 @@ A high-performance file and content search tool for Windows, combining Everythin
 - **Customizable Player**: Select your preferred media player in Settings
 - **Animated Icons**: Visual feedback with animated status icons (lightning bolt, spinning globe, rotating arrows)
 - **No Console Flash**: Clean startup without console window flicker
+- **File Operations**: Rename files directly from context menu
+- **Search History**: Persisted across sessions
 
 ## Requirements
 
@@ -184,5 +186,3 @@ MIT
 ## Author
 
 hgxszhj &lt;hgxszhj@gmail.com&gt;
-# turbo-search
-# ripgrep-soft
