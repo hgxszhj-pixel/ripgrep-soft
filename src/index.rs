@@ -232,6 +232,22 @@ impl FileIndex {
         self.entries.push(entry);
     }
 
+    /// Remove a file entry from the index by path
+    pub fn remove_entry(&mut self, path: &Path) -> bool {
+        let pos = self.entries.iter().position(|e| e.path == path);
+        if let Some(pos) = pos {
+            self.entries.remove(pos);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Get mutable reference to entries for incremental updates
+    pub fn entries_mut(&mut self) -> &mut Vec<FileEntry> {
+        &mut self.entries
+    }
+
     /// Get the number of entries in the index
     #[inline]
     pub fn len(&self) -> usize {

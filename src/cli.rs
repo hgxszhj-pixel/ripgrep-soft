@@ -1,25 +1,29 @@
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "ripgrep-soft")]
+#[command(name = "turbo-search")]
 #[command(about = "A high-performance file and content search tool", long_about = None)]
 pub struct Cli {
-    #[command(subcommand)]
-    pub command: Commands,
+    /// Launch GUI mode (default when no subcommand is provided)
+    #[arg(long, short)]
+    pub gui: bool,
 
     #[arg(global = true, short, long)]
     pub verbose: bool,
 
     #[arg(global = true, short, long)]
     pub quiet: bool,
+
+    #[command(subcommand)]
+    pub command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
 pub enum Commands {
     Search {
         /// Path to search in (file or directory)
-        #[arg(short, long, default_value = ".")]
-        path: String,
+        #[arg(short, long)]
+        path: Option<String>,
 
         /// Search pattern for filename search
         #[arg(long)]
@@ -44,10 +48,14 @@ pub enum Commands {
         /// Number of lines of context around matches
         #[arg(long = "context", short = 'C', default_value = "0")]
         context: usize,
+
+        /// Limit number of results
+        #[arg(long, short = 'l', default_value = "100")]
+        limit: usize,
     },
     Index {
-        #[arg(short, long, default_value = ".")]
-        path: String,
+        #[arg(short, long)]
+        path: Option<String>,
 
         #[arg(short, long)]
         rebuild: bool,
@@ -63,5 +71,11 @@ impl Cli {
         } else {
             "info"
         }
+    }
+
+    /// Returns true if GUI mode should be launched
+    pub fn should_launch_gui(&self) -> bool {
+        // GUI if --gui flag is set, or no command provided
+        self.gui || self.command.is_none()
     }
 }
