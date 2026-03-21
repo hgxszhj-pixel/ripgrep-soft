@@ -280,7 +280,7 @@ impl Searcher {
     fn get_cached_regex(pattern: &str, case_sensitive: bool) -> Option<Arc<regex::Regex>> {
         let case_flag = if case_sensitive { "" } else { "(?i)" };
         // Use same format as original: case_flag + pattern (e.g., (?i)test\d+\.txt)
-        let cache_key = format!("{}{}", case_flag, pattern);
+        let cache_key = format!("{case_flag}{pattern}");
 
         // Try to get from cache first - DashMap allows concurrent reads without locking
         if let Some(entry) = REGEX_CACHE.get(&cache_key) {

@@ -59,6 +59,7 @@ pub struct FavoriteSearch {
 }
 
 impl FavoriteSearch {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         name: String,
         search_pattern: String,
@@ -256,7 +257,7 @@ impl PaginationState {
         if self.total_items == 0 {
             return 1;
         }
-        (self.total_items + self.items_per_page - 1) / self.items_per_page
+        self.total_items.div_ceil(self.items_per_page)
     }
 
     /// Get offset for current page (0-based)

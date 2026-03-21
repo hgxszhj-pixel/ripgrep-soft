@@ -1,11 +1,15 @@
 //! File indexing module - provides file system walking and index structure
 
-use std::fs;
+use std::fs::{self, File};
+use std::io::{Read, Write, BufReader, BufWriter};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use rayon::prelude::*;
 use walkdir::WalkDir;
 use ignore::WalkBuilder;
+use flate2::read::GzDecoder;
+use flate2::write::GzEncoder;
+use flate2::Compression;
 
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
@@ -275,18 +279,58 @@ impl FileIndex {
         }
     }
 
-    /// Save index to file
+    /// Save index to file with gzip compression
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
         let json = serde_json::to_string(self)?;
-        std::fs::write(path, json)
+
+        let file = File::create(path)?;
+        let encoder = GzEncoder::new(file, Compression::default());
+        let mut writer = BufWriter::new(encoder);
+
+        writer.write_all(json.as_bytes())?;
+        writer.flush()?;
+
+        Ok(())
     }
 
-    /// Load index from file with security validation
+    /// Load index from file with gzip decompression
+    /// Also supports legacy plain JSON format for backward compatibility
     pub fn load(path: &Path) -> std::io::Result<Self> {
+        // First try gzip format (current format)
+        if let Ok(index) = Self::load_gzip(path) {
+            return Ok(index);
+        }
+
+        // Fallback to plain text format (legacy)
+        Self::load_plain_text(path)
+    }
+
+    /// Load index with gzip decompression
+    fn load_gzip(path: &Path) -> std::io::Result<Self> {
+        let file = File::open(path)?;
+        let decoder = GzDecoder::new(file);
+        let mut reader = BufReader::new(decoder);
+
+        let mut content = String::new();
+        reader.read_to_string(&mut content)?;
+
+        let mut index: FileIndex = serde_json::from_str(&content)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+        Self::validate_and_fix_index(&mut index)
+    }
+
+    /// Load index from plain text JSON (legacy format)
+    fn load_plain_text(path: &Path) -> std::io::Result<Self> {
         let content = std::fs::read_to_string(path)?;
         let mut index: FileIndex = serde_json::from_str(&content)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
+        Self::validate_and_fix_index(&mut index)
+    }
+
+    /// Validate and fix index entries for security
+    fn validate_and_fix_index(index: &mut FileIndex) -> std::io::Result<Self> {
         // Security: Validate that stored paths are within the indexed root directory
         // This prevents path traversal attacks via malicious index files
         let root_path = index.path.canonicalize()
@@ -309,7 +353,7 @@ impl FileIndex {
             }
         }
 
-        Ok(index)
+        Ok(std::mem::take(index))
     }
 
     /// Get root path (alias for path field)
@@ -513,8 +557,8 @@ impl FileIndex {
     }
 
     /// Walk directory using jwalk for high-performance parallel traversal
-    /// jwalk is ~4x faster than walkdir for sorted results with metadata
-    /// Uses Rayon for parallel directory processing
+    /// Optimized jwalk - fast parallel directory traversal
+    /// Skip sorting for speed, skip hidden/system files
     #[cfg(windows)]
     pub fn walk_directory_jwalk(&mut self, path: &Path, max_files: usize) -> std::io::Result<usize> {
         if !path.exists() {
@@ -525,11 +569,10 @@ impl FileIndex {
         let capacity = max_files.min(1_000_000);
         self.entries.reserve(capacity);
 
-        // Use jwalk for parallel directory traversal with cached metadata
-        // jwalk processes directories in parallel using Rayon
-        // Use from_jwalk_entry to avoid double I/O
+        // Optimized: disable sorting, skip hidden files, parallel processing
         let entries: Vec<FileEntry> = JwalkWalkDir::new(path)
-            .sort(true)  // Enable sorted results (jwalk's strength)
+            .sort(false)  // Disable sorting for speed
+            .skip_hidden(true)  // Skip hidden files
             .into_iter()
             .filter_map(|e| e.ok())
             .filter(|e| e.file_type().is_file())
@@ -839,5 +882,116 @@ mod tests {
 
         assert_eq!(entry.name, "FILE.txt");
         assert_eq!(entry.name_lower, "file.txt");
+    }
+}
+
+// ============================================================================
+// File Walker Module - Traversal strategies for file indexing
+// ============================================================================
+
+/// Result type for file walker
+pub type WalkResult = std::io::Result<Vec<FileEntry>>;
+
+/// Trait for file system walkers - enables different traversal strategies
+pub trait FileWalker {
+    /// Walk a directory and return file entries
+    fn walk(&self, path: &Path) -> WalkResult;
+
+    /// Walk with max file limit
+    fn walk_with_limit(&self, path: &Path, max_files: usize) -> WalkResult;
+}
+
+/// Standard walkdir-based walker
+pub struct WalkdirWalker {
+    _options: IndexOptions,
+}
+
+impl WalkdirWalker {
+    /// Create a new WalkdirWalker
+    #[allow(dead_code)]
+    pub fn new(options: IndexOptions) -> Self {
+        Self { _options: options }
+    }
+}
+
+impl FileWalker for WalkdirWalker {
+    fn walk(&self, path: &Path) -> WalkResult {
+        self.walk_with_limit(path, usize::MAX)
+    }
+
+    fn walk_with_limit(&self, path: &Path, max_files: usize) -> WalkResult {
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+
+        let entries: Vec<FileEntry> = walkdir::WalkDir::new(path)
+            .min_depth(1)
+            .follow_links(false)
+            .same_file_system(true)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+            .filter_map(|e| FileEntry::from_walk_entry(&e))
+            .take(max_files)
+            .collect();
+
+        Ok(entries)
+    }
+}
+
+/// Jwalk-based walker for Windows (parallel, faster)
+#[cfg(windows)]
+pub struct JwalkWalker {
+    skip_hidden: bool,
+}
+
+#[cfg(windows)]
+impl JwalkWalker {
+    /// Create a new JwalkWalker
+    pub fn new(skip_hidden: bool) -> Self {
+        Self { skip_hidden }
+    }
+}
+
+#[cfg(windows)]
+impl FileWalker for JwalkWalker {
+    fn walk(&self, path: &Path) -> WalkResult {
+        self.walk_with_limit(path, usize::MAX)
+    }
+
+    fn walk_with_limit(&self, path: &Path, max_files: usize) -> WalkResult {
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+
+        let entries: Vec<FileEntry> = jwalk::WalkDir::new(path)
+            .sort(false)
+            .skip_hidden(self.skip_hidden)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+            .filter_map(|e| FileEntry::from_jwalk_entry(&e))
+            .take(max_files)
+            .collect();
+
+        Ok(entries)
+    }
+}
+
+/// Create appropriate walker based on platform
+pub fn create_walker(skip_hidden: bool) -> Box<dyn FileWalker> {
+    #[cfg(windows)]
+    {
+        Box::new(JwalkWalker::new(skip_hidden))
+    }
+    #[cfg(not(windows))]
+    {
+        let options = IndexOptions {
+            skip_hidden,
+            skip_system: false,
+            follow_symlinks: false,
+            ignore_patterns: Vec::new(),
+        };
+        Box::new(WalkdirWalker::new(options))
     }
 }

@@ -168,10 +168,58 @@ impl std::fmt::Display for ConfigError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ConfigError::NoConfigDir => write!(f, "No configuration directory found"),
-            ConfigError::Io(e) => write!(f, "IO error: {}", e),
-            ConfigError::Serialize(e) => write!(f, "Serialization error: {}", e),
+            ConfigError::Io(e) => write!(f, "IO error: {e}"),
+            ConfigError::Serialize(e) => write!(f, "Serialization error: {e}"),
         }
     }
 }
 
 impl std::error::Error for ConfigError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_config() {
+        let config = AppConfig::default();
+        assert_eq!(config.theme, AppTheme::Blue);
+        assert_eq!(config.font_size, 14.0);
+        assert_eq!(config.max_index_files, 100_000);
+        assert_eq!(config.max_filename_results, 500);
+        assert_eq!(config.max_content_results, 5_000);
+        assert!(config.show_welcome);
+        assert!(config.last_search_path.is_none());
+        assert!(config.media_player.is_none());
+    }
+
+    #[test]
+    fn test_config_dir() {
+        let dir = AppConfig::config_dir();
+        assert!(dir.is_some());
+        let path = dir.unwrap();
+        assert!(path.to_string_lossy().contains("turbo-search"));
+    }
+
+    #[test]
+    fn test_serialize_roundtrip() {
+        let config = AppConfig::default();
+        let json = serde_json::to_string(&config).unwrap();
+        let loaded: AppConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(config.theme, loaded.theme);
+        assert_eq!(config.font_size, loaded.font_size);
+        assert_eq!(config.max_index_files, loaded.max_index_files);
+    }
+
+    #[test]
+    fn test_config_error_display() {
+        let err = ConfigError::NoConfigDir;
+        assert!(err.to_string().contains("configuration directory"));
+
+        let err = ConfigError::Io("test".to_string());
+        assert!(err.to_string().contains("IO error"));
+
+        let err = ConfigError::Serialize("test".to_string());
+        assert!(err.to_string().contains("Serialization error"));
+    }
+}

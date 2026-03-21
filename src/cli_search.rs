@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 /// Run CLI search command
+#[allow(clippy::too_many_arguments)]
 pub fn run_search(
     path: Option<String>,
     pattern: Option<String>,
@@ -37,7 +38,7 @@ pub fn run_search(
     }
 
     println!("Searching in: {}", search_path.display());
-    println!("Pattern: {}", search_pattern);
+    println!("Pattern: {search_pattern}");
     println!("Mode: {}", if is_content_search { "Content" } else { "Filename" });
     println!("---");
 
@@ -125,7 +126,7 @@ pub fn run_index(
 
     // Save index to file
     let index_path_str = index_path.to_string_lossy().replace(['\\', '/', ':'], "_");
-    let index_file = PathBuf::from(format!("index_{}.json", index_path_str));
+    let index_file = PathBuf::from(format!("index_{index_path_str}.json"));
     index.save(&index_file)?;
     println!("Index saved to: {}", index_file.display());
 

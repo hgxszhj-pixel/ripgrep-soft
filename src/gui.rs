@@ -9,173 +9,18 @@ use crate::index::{FileEntry, FileIndex};
 use crate::search::{SearchQuery, Searcher, SizeFilter};
 use crate::gui::state::{AppTheme, SearchMode, FileCategory, PaginationState, ITEMS_PER_PAGE_OPTIONS, FavoriteSearch, Favorites};
 use eframe::egui::{self, FontDefinitions, FontData};
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::path::PathBuf;
 use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::Instant;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
-
-/// Generate a safe filename from a path using a hash
-fn path_to_safe_filename(path: &std::path::Path) -> String {
-    let path_str = path.to_string_lossy();
-    let mut hasher = DefaultHasher::new();
-    path_str.hash(&mut hasher);
-    format!("{:x}", hasher.finish())
-}
-
-/// Get the app config directory path
-fn get_app_config_dir() -> Option<std::path::PathBuf> {
-    dirs::data_local_dir().map(|d| d.join("turbo-search"))
-}
-
-/// Save the last search path to config file
-fn save_last_search_path(path: &std::path::Path) {
-    if let Some(config_dir) = get_app_config_dir() {
-        if let Err(e) = std::fs::create_dir_all(&config_dir) {
-            eprintln!("Failed to create config directory: {}", e);
-            return;
-        }
-        let config_file = config_dir.join("last_path.txt");
-        if let Err(e) = std::fs::write(&config_file, path.to_string_lossy().as_bytes()) {
-            eprintln!("Failed to save last path: {}", e);
-        }
-    }
-}
-
-/// Truncate path for display
-fn truncate_path(path: &str, max_len: usize) -> String {
-    if path.len() <= max_len {
-        path.to_string()
-    } else {
-        let start = path.len() - max_len + 3;
-        format!("...{}", &path[start..])
-    }
-}
-
-/// Format file size in human-readable format
-fn format_size(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = KB * 1024;
-    const GB: u64 = MB * 1024;
-
-    if bytes >= GB {
-        format!("{:.2} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.2} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.2} KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{} B", bytes)
-    }
-}
-
-/// Known media players to detect on Windows
-const KNOWN_PLAYERS: &[(&str, &str)] = &[
-    ("VLC", "vlc.exe"),
-    ("PotPlayer", "PotPlayerMini64.exe"),
-    ("PotPlayer (32-bit)", "PotPlayer.exe"),
-    ("MPC-HC (64-bit)", "MPC-HC64.exe"),
-    ("MPC-HC (32-bit)", "MPC-HC.exe"),
-    ("MPV", "mpv.exe"),
-    ("SMPlayer", "smplayer.exe"),
-    ("KMPlayer", "KMPlayer.exe"),
-    ("Windows Media Player", "wmplayer.exe"),
-    ("GOM Player", "GOM.exe"),
-];
-
-/// Detect installed media players on the system
-#[cfg(windows)]
-fn detect_media_players() -> Vec<(String, String)> {
-    use std::collections::HashSet;
-    use std::env;
-
-    let mut found_players: Vec<(String, String)> = Vec::new();
-    let mut checked_paths: HashSet<String> = HashSet::new();
-
-    // Search paths: PATH + common installation directories
-    let mut search_dirs: Vec<std::path::PathBuf> = Vec::new();
-
-    // Add PATH directories
-    let path_var = env::var("PATH").unwrap_or_default();
-    search_dirs.extend(env::split_paths(&path_var));
-
-    // Add common installation directories
-    if let Ok(program_files) = env::var("ProgramFiles") {
-        search_dirs.push(program_files.into());
-    }
-    if let Ok(program_files_x86) = env::var("ProgramFiles(x86)") {
-        search_dirs.push(program_files_x86.into());
-    }
-    // Add common video player subdirectories
-    let common_player_dirs = [
-        "VideoLAN",
-        "Potplayer",
-        "MPC-HC",
-        "K-Lite Codec Pack",
-        "GOM",
-        "KMPlayer",
-        "smplayer",
-        "MPV",
-    ];
-    for dir in &common_player_dirs {
-        if let Ok(program_files) = env::var("ProgramFiles") {
-            search_dirs.push(std::path::PathBuf::from(&program_files).join(dir));
-        }
-        if let Ok(program_files_x86) = env::var("ProgramFiles(x86)") {
-            search_dirs.push(std::path::PathBuf::from(&program_files_x86).join(dir));
-        }
-    }
-
-    // Search for each player
-    for (name, exe_name) in KNOWN_PLAYERS {
-        for search_dir in &search_dirs {
-            if !search_dir.exists() {
-                continue;
-            }
-            // Check directly in search_dir
-            let exe_path = search_dir.join(exe_name);
-            if exe_path.exists() {
-                let path_str = exe_path.to_string_lossy().to_string();
-                if !checked_paths.contains(&path_str) {
-                    checked_paths.insert(path_str.clone());
-                    found_players.push((name.to_string(), path_str));
-                }
-            }
-            // Also check subdirectories (for players with versioned folders)
-            if let Ok(entries) = std::fs::read_dir(search_dir) {
-                for entry in entries.flatten() {
-                    let sub_path = entry.path();
-                    if sub_path.is_dir() {
-                        let exe_path = sub_path.join(exe_name);
-                        if exe_path.exists() {
-                            let path_str = exe_path.to_string_lossy().to_string();
-                            if !checked_paths.contains(&path_str) {
-                                checked_paths.insert(path_str.clone());
-                                found_players.push((name.to_string(), path_str));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Add system default as first option
-    if !found_players.is_empty() {
-        found_players.insert(0, ("System Default".to_string(), "default".to_string()));
-    }
-
-    found_players
-}
-
-/// Detect installed media players (non-Windows fallback)
-#[cfg(not(windows))]
-fn detect_media_players() -> Vec<(String, String)> {
-    vec![
-        ("System Default".to_string(), "xdg-open".to_string()),
-    ]
-}
+// Re-export utils functions for convenience
+use crate::utils::{
+    format_size, truncate_path,
+    is_video_file, is_audio_file, open_with_player,
+    path_to_safe_filename, save_last_search_path,
+};
 
 pub struct RipgrepApp {
     search_query: String,
@@ -224,6 +69,8 @@ pub struct RipgrepApp {
     // Favorites
     favorites: Favorites,
     show_favorites_dropdown: bool,
+    // Rename dialog
+    rename_dialog: Option<(std::path::PathBuf, String)>,
 }
 
 impl Default for RipgrepApp {
@@ -279,6 +126,7 @@ impl RipgrepApp {
             pagination: PaginationState::new(100),
             favorites: Favorites::new(),
             show_favorites_dropdown: false,
+            rename_dialog: None,
         };
 
         // Load settings from config file
@@ -300,7 +148,7 @@ impl RipgrepApp {
 
     /// Re-detect media players
     fn detect_media_players() -> Vec<(String, String)> {
-        crate::gui::detect_media_players()
+        crate::utils::detect_media_players()
     }
 
     fn check_ripgrep_available() -> bool {
@@ -320,7 +168,7 @@ impl RipgrepApp {
     fn save_settings(&self) {
         if let Some(config_dir) = Self::get_config_dir() {
             if let Err(e) = std::fs::create_dir_all(&config_dir) {
-                eprintln!("Failed to create config directory: {}", e);
+                eprintln!("Failed to create config directory: {e}");
                 return;
             }
 
@@ -336,7 +184,7 @@ impl RipgrepApp {
 
             if let Ok(json) = serde_json::to_string_pretty(&settings) {
                 if let Err(e) = std::fs::write(&settings_file, json) {
-                    eprintln!("Failed to save settings: {}", e);
+                    eprintln!("Failed to save settings: {e}");
                 }
             }
         }
@@ -359,13 +207,13 @@ impl RipgrepApp {
     fn save_favorites(&self) {
         if let Some(config_dir) = Self::get_config_dir() {
             if let Err(e) = std::fs::create_dir_all(&config_dir) {
-                eprintln!("Failed to create config directory: {}", e);
+                eprintln!("Failed to create config directory: {e}");
                 return;
             }
             let favorites_file = config_dir.join("favorites.json");
             if let Ok(json_str) = serde_json::to_string_pretty(&self.favorites) {
                 if let Err(e) = std::fs::write(&favorites_file, json_str) {
-                    eprintln!("Failed to save favorites: {}", e);
+                    eprintln!("Failed to save favorites: {e}");
                 }
             }
         }
@@ -488,16 +336,16 @@ impl RipgrepApp {
 
         // Check turbo-search first
         let app_dir = data_dir.join("turbo-search");
-        let mut index_file = app_dir.join(format!("index_{}.gz", path_hash));
+        let mut index_file = app_dir.join(format!("index_{path_hash}.gz"));
 
         // If not found, try old ripgrep-soft directory
         if !index_file.exists() {
             let old_app_dir = data_dir.join("ripgrep-soft");
-            let old_index_file = old_app_dir.join(format!("index_{}.gz", path_hash));
+            let old_index_file = old_app_dir.join(format!("index_{path_hash}.gz"));
             if old_index_file.exists() {
                 // Copy to new location for future use
                 if let Err(e) = std::fs::copy(&old_index_file, &index_file) {
-                    eprintln!("Failed to migrate index: {}", e);
+                    eprintln!("Failed to migrate index: {e}");
                     index_file = old_index_file;
                 }
             }
@@ -556,8 +404,7 @@ impl RipgrepApp {
 
                         if self.search_path != std::path::PathBuf::from(".") && index_len > 0 {
                             self.progress_message = format!(
-                                "Loaded {} files - click Search",
-                                index_len
+                                "Loaded {index_len} files - click Search"
                             );
 
                             let index_for_save = self.index.clone();
@@ -566,12 +413,12 @@ impl RipgrepApp {
                                 if let Some(data_dir) = dirs::data_local_dir() {
                                     let app_dir = data_dir.join("turbo-search");
                                     if let Err(e) = std::fs::create_dir_all(&app_dir) {
-                                        eprintln!("Failed to create app directory: {}", e);
+                                        eprintln!("Failed to create app directory: {e}");
                                     } else {
                                         let path_hash = path_to_safe_filename(&search_path_for_save);
-                                        let index_file = app_dir.join(format!("index_{}.gz", path_hash));
+                                        let index_file = app_dir.join(format!("index_{path_hash}.gz"));
                                         if let Err(e) = index_for_save.save(&index_file) {
-                                            eprintln!("Failed to save index: {}", e);
+                                            eprintln!("Failed to save index: {e}");
                                         }
                                     }
                                 }
@@ -610,7 +457,7 @@ impl RipgrepApp {
                 .map(|s| s.to_string())
                 .unwrap_or_default();
             let path_str = entry.path.to_string_lossy().to_string();
-            self.displayed_results_text.push(format!("{} | {}", file_name, path_str));
+            self.displayed_results_text.push(format!("{file_name} | {path_str}"));
         }
     }
 
@@ -795,7 +642,7 @@ impl RipgrepApp {
             }
 
             // Page info
-            ui.label(egui::RichText::new(format!("Page {}/{} ", current_page, total_pages)).strong());
+            ui.label(egui::RichText::new(format!("Page {current_page}/{total_pages} ")).strong());
 
             // Next page button
             if ui.button("Next >").clicked() {
@@ -815,10 +662,10 @@ impl RipgrepApp {
             ui.label("Per page:");
             let mut current_per_page = self.pagination.items_per_page;
             egui::ComboBox::from_id_salt("items_per_page")
-                .selected_text(format!("{}", current_per_page))
+                .selected_text(format!("{current_per_page}"))
                 .show_ui(ui, |ui| {
                     for &per_page in ITEMS_PER_PAGE_OPTIONS {
-                        if ui.selectable_value(&mut current_per_page, per_page, format!("{}", per_page)).clicked() {
+                        if ui.selectable_value(&mut current_per_page, per_page, format!("{per_page}")).clicked() {
                             self.pagination.items_per_page = per_page;
                             self.pagination.current_page = 1; // Reset to first page
                             self.handle_page_change();
@@ -830,14 +677,14 @@ impl RipgrepApp {
         // Quick page jump
         ui.horizontal(|ui| {
             ui.label("Go to page:");
-            let mut page_input = format!("{}", current_page);
+            let mut page_input = format!("{current_page}");
             if ui.add(egui::TextEdit::singleline(&mut page_input).desired_width(60.0)).lost_focus() {
                 if let Ok(page) = page_input.parse::<usize>() {
                     self.pagination.go_to_page(page);
                     self.handle_page_change();
                 }
             }
-            ui.label(format!("(1-{})", total_pages));
+            ui.label(format!("(1-{total_pages})"));
         });
     }
 
@@ -908,7 +755,7 @@ impl RipgrepApp {
         let binary_exts = ["exe", "dll", "zip", "rar", "7z", "tar", "gz", "jpg", "jpeg", "png", "gif", "bmp", "ico", "webp", "mp3", "mp4", "avi", "mkv", "mov", "wmv", "flv", "webm", "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx"];
 
         if binary_exts.contains(&extension.as_str()) {
-            return format!("[Preview not available for {} files]", extension);
+            return format!("[Preview not available for {extension} files]");
         }
 
         // Try to read as UTF-8
@@ -933,77 +780,381 @@ impl RipgrepApp {
                             content.to_string()
                         }
                     }
-                    Err(e) => format!("[Cannot read file: {}]", e)
+                    Err(e) => format!("[Cannot read file: {e}]")
                 }
             }
         }
     }
 
-    /// Check if file is a video
-    fn is_video_file(path: &std::path::Path) -> bool {
-        let extension = path.extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_lowercase();
-        matches!(extension.as_str(), "mp4" | "avi" | "mkv" | "mov" | "wmv" | "flv" | "webm" | "m4v" | "mpg" | "mpeg" | "3gp")
+    // Use utils functions directly - no need to duplicate
+}
+
+// ============ UI Rendering Helpers ============
+
+impl RipgrepApp {
+    /// Render settings dialog
+    fn render_settings_dialog(&mut self, ctx: &egui::Context) {
+        if !self.show_settings { return; }
+
+        egui::Window::new("Settings")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.heading("Settings");
+                ui.separator();
+
+                // Theme selection
+                ui.label(egui::RichText::new("Appearance").strong());
+                ui.horizontal(|ui| {
+                    ui.label("Theme:");
+                    egui::ComboBox::from_id_salt("settings_theme")
+                        .selected_text(self.theme.display_name())
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.theme, AppTheme::Light, "Light");
+                            ui.selectable_value(&mut self.theme, AppTheme::Dark, "Dark");
+                            ui.selectable_value(&mut self.theme, AppTheme::Blue, "Blue");
+                            ui.selectable_value(&mut self.theme, AppTheme::Green, "Green");
+                            ui.selectable_value(&mut self.theme, AppTheme::Purple, "Purple");
+                        });
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Font Size:");
+                    ui.add(egui::Slider::new(&mut self.font_size, 10.0..=24.0).text(""));
+                    ui.label(format!("{}px", self.font_size as i32));
+                });
+
+                ui.separator();
+
+                // Search settings
+                ui.label(egui::RichText::new("Search").strong());
+                ui.horizontal(|ui| {
+                    ui.label("Max index files:");
+                    ui.add(egui::Slider::new(&mut self.max_index_files, 10000..=1000000).text(""));
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Max filename results:");
+                    ui.add(egui::Slider::new(&mut self.max_filename_results, 50..=5000).text(""));
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Max content results:");
+                    ui.add(egui::Slider::new(&mut self.max_content_results, 100..=10000).text(""));
+                });
+
+                ui.separator();
+
+                // Startup settings
+                ui.label(egui::RichText::new("Startup").strong());
+                ui.checkbox(&mut self.show_welcome, "Show welcome dialog on startup");
+
+                ui.separator();
+
+                // Media player selection
+                ui.label(egui::RichText::new("Media Player").strong());
+                ui.horizontal(|ui| {
+                    ui.label("Player:");
+                    egui::ComboBox::from_id_salt("settings_player")
+                        .selected_text(self.selected_player.as_deref().unwrap_or("System Default"))
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.selected_player, None, "System Default");
+                            for (name, _) in &self.available_players {
+                                ui.selectable_value(&mut self.selected_player, Some(name.clone()), name);
+                            }
+                        });
+                });
+
+                ui.separator();
+
+                // Buttons
+                ui.horizontal(|ui| {
+                    if ui.button("Save").clicked() {
+                        self.save_settings();
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Close").clicked() {
+                            self.show_settings = false;
+                        }
+                    });
+                });
+            });
     }
 
-    /// Check if file is audio
-    fn is_audio_file(path: &std::path::Path) -> bool {
-        let extension = path.extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_lowercase();
-        matches!(extension.as_str(), "mp3" | "wav" | "flac" | "aac" | "ogg" | "wma" | "m4a")
+    /// Render toolbar panel
+    fn render_toolbar(&mut self, ctx: &egui::Context) {
+        egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                // Animated lightning bolt
+                let time = ctx.input(|i| i.time);
+                let frame = ((time * 6.0) as usize) % 4;
+                let bolt_frames = ["\u{26A1}", "\u{1F4A5}", "\u{26A1}", "\u{1F5E2}"];
+                ui.label(egui::RichText::new(bolt_frames[frame]).size(28.0));
+
+                ui.heading(egui::RichText::new("TurboSearch").strong().color(egui::Color32::from_rgb(0, 120, 212)));
+                ui.label(egui::RichText::new("File Search").small().color(egui::Color32::GRAY));
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label("Font:");
+                    if ui.add(egui::Slider::new(&mut self.font_size, 10.0..=24.0).text("Size")).changed() {
+                        self.apply_font_size(ctx);
+                    }
+
+                    ui.separator();
+
+                    // Theme toggle
+                    ui.label("Theme:");
+                    let themes = [
+                        (AppTheme::Light, "\u{2600}"),
+                        (AppTheme::Dark, "\u{1F319}"),
+                        (AppTheme::Blue, "\u{1F499}"),
+                        (AppTheme::Green, "\u{1F49A}"),
+                    ];
+                    for (theme, icon) in themes {
+                        let is_active = self.theme == theme;
+                        let btn = egui::Button::new(egui::RichText::new(icon).size(16.0))
+                            .frame(false)
+                            .fill(if is_active {
+                                ui.style().visuals.selection.bg_fill
+                            } else {
+                                egui::Color32::TRANSPARENT
+                            });
+                        if ui.add(btn).clicked() {
+                            self.theme = theme;
+                            self.apply_theme(ctx);
+                        }
+                    }
+
+                    ui.separator();
+
+                    // Settings button
+                    if ui.button("\u{2699} Settings").clicked() {
+                        self.show_settings = true;
+                    }
+                });
+            });
+
+            ui.separator();
+
+            // Search path row
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("\u{1F4C1}").size(16.0));
+                ui.label("Search in:");
+
+                if self.search_path.as_os_str().is_empty() {
+                    ui.label(egui::RichText::new("<No folder selected>").small().color(egui::Color32::GRAY));
+                } else {
+                    ui.label(
+                        egui::RichText::new(truncate_path(&self.search_path.display().to_string(), 50))
+                            .small()
+                            .background_color(ui.style().visuals.faint_bg_color)
+                    );
+                }
+
+                if self.is_indexing {
+                    ui.spinner();
+                    ui.label("Indexing...");
+                } else if ui.add(egui::Button::new(egui::RichText::new("\u{1F4C2} Browse").color(egui::Color32::WHITE).background_color(egui::Color32::from_rgb(0, 120, 212)))).clicked() {
+                    if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                        self.search_path = path.clone();
+                        self.search_path_text = path.display().to_string();
+                        save_last_search_path(&path);
+
+                        if let Some(data_dir) = dirs::data_local_dir() {
+                            let index_dir = data_dir.join("turbo-search");
+                            self.index = Arc::new(FileIndex::load(&index_dir).unwrap_or_default());
+                            self.displayed_results.clear();
+                            self.displayed_results_text.clear();
+                            self.total_results = 0;
+                            self.pagination.current_page = 1;
+                        }
+                    }
+                }
+
+                // Re-index button
+                if !self.search_path.as_os_str().is_empty() && !self.is_indexing {
+                    if ui.button("\u{1F504} Re-index").clicked() {
+                        self.start_background_indexing();
+                    }
+                }
+            });
+
+            ui.separator();
+
+            // Search input row
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("\u{1F50D}").size(16.0));
+                ui.label("Search:");
+
+                let search_text = egui::TextEdit::singleline(&mut self.search_path_text)
+                    .hint_text("Enter search term...")
+                    .desired_width(400.0);
+                ui.add(search_text);
+
+                // Parse search term
+                let search_term = self.search_path_text.trim();
+                if search_term.is_empty() {
+                    self.search_query.clear();
+                    self.search_query_lower.clear();
+                } else if self.search_query != search_term {
+                    self.search_query = search_term.to_string();
+                    self.search_query_lower = search_term.to_lowercase();
+                }
+
+                // Search mode
+                ui.label("Mode:");
+                egui::ComboBox::from_id_salt("search_mode")
+                    .selected_text(self.search_mode.display_name())
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.search_mode, SearchMode::Filename, "Filename");
+                        ui.selectable_value(&mut self.search_mode, SearchMode::Content, "Content");
+                    });
+
+                // Options
+                ui.checkbox(&mut self.use_regex, "Regex");
+                ui.checkbox(&mut self.use_glob, "Glob");
+                ui.checkbox(&mut self.case_sensitive, "Case");
+                ui.checkbox(&mut self.use_ripgrep, "ripgrep");
+
+                // Search button
+                if ui.add(egui::Button::new(egui::RichText::new("\u{1F50D} Search").color(egui::Color32::WHITE).background_color(egui::Color32::from_rgb(0, 120, 212)))).clicked() {
+                    self.perform_search();
+                }
+
+                // Clear button
+                if ui.button("Clear").clicked() {
+                    self.reset_search();
+                }
+
+                // Stop button
+                if self.is_searching {
+                    if ui.button("Stop").clicked() {
+                        self.is_searching = false;
+                    }
+                }
+            });
+
+            ui.separator();
+
+            // Filter row
+            ui.horizontal(|ui| {
+                ui.label("Size filter:");
+                egui::ComboBox::from_id_salt("size_filter")
+                    .selected_text(if self.size_filter.is_empty() { "Any" } else { &self.size_filter })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.size_filter, String::new(), "Any");
+                        ui.selectable_value(&mut self.size_filter, "<1kb".to_string(), "< 1 KB");
+                        ui.selectable_value(&mut self.size_filter, "<1mb".to_string(), "< 1 MB");
+                        ui.selectable_value(&mut self.size_filter, "<10mb".to_string(), "< 10 MB");
+                        ui.selectable_value(&mut self.size_filter, "<100mb".to_string(), "< 100 MB");
+                        ui.selectable_value(&mut self.size_filter_custom, false, "Custom");
+                    });
+
+                if self.size_filter_custom {
+                    ui.add(egui::TextEdit::singleline(&mut self.size_filter).desired_width(100.0).hint_text("e.g. >1mb"));
+                }
+
+                // Pagination display
+                if self.total_results > 0 {
+                    ui.separator();
+                    ui.label(format!("Results: {} / {}", self.displayed_results.len(), self.total_results));
+                    if let Some(duration) = self.last_search_duration {
+                        ui.label(egui::RichText::new(format!("{:.2}s", duration as f64 / 1000.0)).small().color(egui::Color32::GRAY));
+                    }
+                }
+            });
+        });
     }
 
-    /// Open file with system default player
-    fn open_with_player(path: &std::path::Path, player_path: &str) {
-        #[cfg(windows)]
-        {
-            use std::process::Command;
-            let path_str = path.to_string_lossy().to_string();
-
-            if player_path == "default" || player_path.is_empty() {
-                // Use system default
-                let _ = Command::new("cmd")
-                    .args(["/c", "start", "", &path_str])
-                    .spawn();
-            } else {
-                // Use specified player
-                let _ = Command::new(player_path)
-                    .arg(&path_str)
-                    .spawn();
-            }
-        }
-        #[cfg(not(windows))]
-        {
-            use std::process::Command;
-            if player_path == "default" || player_path.is_empty() {
-                let _ = Command::new("xdg-open").arg(path).spawn();
-            } else {
-                let _ = Command::new(player_path).arg(path).spawn();
-            }
+    /// Render rename dialog
+    fn render_rename_dialog(&mut self, ctx: &egui::Context) {
+        let rename_data = self.rename_dialog.clone();
+        if let Some((ref path, ref old_name)) = rename_data {
+            let mut new_name = old_name.clone();
+            let path_for_rename = path.clone();
+            egui::Window::new("Rename File")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.heading("Rename File");
+                    ui.separator();
+                    ui.label(format!("Old name: {}", old_name));
+                    ui.add(egui::TextEdit::singleline(&mut new_name).desired_width(300.0));
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        if ui.button("Rename").clicked() {
+                            if let Some(parent) = path.parent() {
+                                let new_path = parent.join(&new_name);
+                                if std::fs::rename(&path_for_rename, &new_path).is_ok() {
+                                    // Update displayed results
+                                    if let Some(idx) = self.displayed_results.iter().position(|e| e.path == path_for_rename) {
+                                        self.displayed_results[idx].path = new_path.clone();
+                                        self.displayed_results[idx].name = new_name.clone();
+                                        self.displayed_results[idx].name_lower = new_name.to_lowercase();
+                                    }
+                                }
+                            }
+                            self.rename_dialog = None;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.rename_dialog = None;
+                        }
+                    });
+                });
         }
     }
 
-    fn open_with_default_player(path: &std::path::Path) {
-        #[cfg(windows)]
-        {
-            use std::process::Command;
-            let path_str = path.to_string_lossy();
-            // Use cmd /c start to open with default application
-            let _ = Command::new("cmd")
-                .args(["/c", "start", "", &path_str])
-                .spawn();
-        }
-        #[cfg(not(windows))]
-        {
-            use std::process::Command;
-            let _ = Command::new("xdg-open")
-                .arg(path)
-                .spawn();
-        }
+    /// Render welcome dialog
+    fn render_welcome_dialog(&mut self, ctx: &egui::Context) {
+        if !self.show_welcome { return; }
+
+        egui::Window::new("Welcome to TurboSearch")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add(egui::Label::new(egui::RichText::new("\u{1F50D}").size(48.0)).selectable(false));
+                    ui.heading(egui::RichText::new("TurboSearch").strong().color(egui::Color32::from_rgb(0, 120, 212)));
+                    ui.label(egui::RichText::new("Fast File & Content Search").small().color(egui::Color32::GRAY));
+                    ui.add_space(10.0);
+                    ui.separator();
+                });
+
+                ui.label(egui::RichText::new("Keyboard Shortcuts").strong());
+                ui.separator();
+
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("[Ctrl+O]").background_color(ui.style().visuals.faint_bg_color));
+                    ui.label("Open folder");
+                });
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("[Enter]").background_color(ui.style().visuals.faint_bg_color));
+                    ui.label("Start search");
+                });
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("[Escape]").background_color(ui.style().visuals.faint_bg_color));
+                    ui.label("Clear search");
+                });
+
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Version").small().color(egui::Color32::GRAY));
+                    ui.label("1.0.0");
+                });
+
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut self.show_welcome, "Show on startup");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.add(egui::Button::new(egui::RichText::new("Get Started \u{2192}").color(egui::Color32::WHITE)).fill(egui::Color32::from_rgb(0, 120, 212))).clicked() {
+                            self.show_welcome = false;
+                        }
+                    });
+                });
+            });
     }
 }
 
@@ -1024,54 +1175,8 @@ impl eframe::App for RipgrepApp {
         self.apply_theme(ctx);
         self.apply_font_size(ctx);
 
-        // Show welcome dialog on first run
-        if self.show_welcome {
-            egui::Window::new("Welcome to TurboSearch")
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                .show(ctx, |ui| {
-                    ui.vertical_centered(|ui| {
-                        ui.add(egui::Label::new(egui::RichText::new("\u{1F50D}").size(48.0)).selectable(false));
-                        ui.heading(egui::RichText::new("TurboSearch").strong().color(egui::Color32::from_rgb(0, 120, 212)));
-                        ui.label(egui::RichText::new("Fast File & Content Search").small().color(egui::Color32::GRAY));
-                        ui.add_space(10.0);
-                        ui.separator();
-                    });
-
-                    ui.label(egui::RichText::new("Keyboard Shortcuts").strong());
-                    ui.separator();
-
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("[Ctrl+O]").background_color(ui.style().visuals.faint_bg_color));
-                        ui.label("Open folder");
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("[Enter]").background_color(ui.style().visuals.faint_bg_color));
-                        ui.label("Start search");
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("[Escape]").background_color(ui.style().visuals.faint_bg_color));
-                        ui.label("Clear search");
-                    });
-
-                    ui.separator();
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("Version").small().color(egui::Color32::GRAY));
-                        ui.label("1.0.0");
-                    });
-
-                    ui.separator();
-                    ui.horizontal(|ui| {
-                        ui.checkbox(&mut self.show_welcome, "Show on startup");
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.add(egui::Button::new(egui::RichText::new("Get Started \u{2192}").color(egui::Color32::WHITE)).fill(egui::Color32::from_rgb(0, 120, 212))).clicked() {
-                                self.show_welcome = false;
-                            }
-                        });
-                    });
-                });
-        }
+        // Show welcome dialog
+        self.render_welcome_dialog(ctx);
 
         // Settings panel
         if self.show_settings {
@@ -1184,6 +1289,43 @@ impl eframe::App for RipgrepApp {
                 });
         }
 
+        // Rename dialog
+        let rename_data = self.rename_dialog.clone();
+        if let Some((ref path, ref old_name)) = rename_data {
+            let mut new_name = old_name.clone();
+            let path_for_rename = path.clone();
+            egui::Window::new("Rename File")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.heading("Rename File");
+                    ui.separator();
+                    ui.label(format!("Old name: {}", old_name));
+                    ui.add(egui::TextEdit::singleline(&mut new_name).desired_width(300.0));
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        if ui.button("Rename").clicked() {
+                            if let Some(parent) = path.parent() {
+                                let new_path = parent.join(&new_name);
+                                if std::fs::rename(&path_for_rename, &new_path).is_ok() {
+                                    // Update displayed results
+                                    if let Some(idx) = self.displayed_results.iter().position(|e| e.path == path_for_rename) {
+                                        self.displayed_results[idx].path = new_path.clone();
+                                        self.displayed_results[idx].name = new_name.clone();
+                                        self.displayed_results[idx].name_lower = new_name.to_lowercase();
+                                    }
+                                }
+                            }
+                            self.rename_dialog = None;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.rename_dialog = None;
+                        }
+                    });
+                });
+        }
+
         // Top toolbar
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -1267,16 +1409,16 @@ impl eframe::App for RipgrepApp {
 
                             // Check turbo-search first
                             let app_dir = data_dir.join("turbo-search");
-                            let mut index_file = app_dir.join(format!("index_{}.gz", path_hash));
+                            let mut index_file = app_dir.join(format!("index_{path_hash}.gz"));
 
                             // If not found, try old ripgrep-soft directory
                             if !index_file.exists() {
                                 let old_app_dir = data_dir.join("ripgrep-soft");
-                                let old_index_file = old_app_dir.join(format!("index_{}.gz", path_hash));
+                                let old_index_file = old_app_dir.join(format!("index_{path_hash}.gz"));
                                 if old_index_file.exists() {
                                     // Copy to new location for future use
                                     if let Err(e) = std::fs::copy(&old_index_file, &index_file) {
-                                        eprintln!("Failed to migrate index: {}", e);
+                                        eprintln!("Failed to migrate index: {e}");
                                         index_file = old_index_file;
                                     }
                                 }
@@ -1484,6 +1626,56 @@ impl eframe::App for RipgrepApp {
                                 self.preview_content = String::new();
                             }
 
+                            // Context menu for file operations
+                            let entry_for_menu = entry.clone();
+                            let pending_rename = Rc::new(RefCell::new(None));
+                            let pending_rename_clone = pending_rename.clone();
+                            response.context_menu(move |ui| {
+                                let file_entry = &entry_for_menu;
+
+                                // Open file location
+                                if ui.button("📂 Open Location").clicked() {
+                                    if let Some(parent) = file_entry.path.parent() {
+                                        let _ = std::process::Command::new("explorer").arg(parent).spawn();
+                                    }
+                                    ui.close();
+                                }
+
+                                // Open file
+                                if ui.button("📄 Open").clicked() {
+                                    let _ = std::process::Command::new("cmd")
+                                        .args(["/c", "start", "", &file_entry.path.to_string_lossy()])
+                                        .spawn();
+                                    ui.close();
+                                }
+
+                                // Rename
+                                if ui.button("✏️ Rename").clicked() {
+                                    *pending_rename_clone.borrow_mut() = Some((file_entry.path.clone(), file_entry.name.clone()));
+                                    ui.close();
+                                }
+
+                                ui.separator();
+
+                                // Copy path
+                                if ui.button("📋 Copy Path").clicked() {
+                                    let path_str = file_entry.path.to_string_lossy().to_string();
+                                    ctx.copy_text(path_str);
+                                    ui.close();
+                                }
+
+                                // Copy name
+                                if ui.button("📋 Copy Name").clicked() {
+                                    ctx.copy_text(file_entry.name.clone());
+                                    ui.close();
+                                }
+                            });
+
+                            // Apply pending rename action
+                            if let Some((path, name)) = pending_rename.borrow().clone() {
+                                self.rename_dialog = Some((path, name));
+                            }
+
                             if response.hovered() {
                                 ui.label(egui::RichText::new(format!("  {} | {}", format_size(entry.size), entry.path.display()))
                                     .small()
@@ -1520,8 +1712,8 @@ impl eframe::App for RipgrepApp {
                         ui.label(format!("Size: {}", format_size(entry.size)));
 
                         // Show play button for media files
-                        let is_video = Self::is_video_file(&entry.path);
-                        let is_audio = Self::is_audio_file(&entry.path);
+                        let is_video = is_video_file(&entry.path);
+                        let is_audio = is_audio_file(&entry.path);
 
                         if is_video || is_audio {
                             ui.horizontal(|ui| {
@@ -1529,7 +1721,7 @@ impl eframe::App for RipgrepApp {
                                 let icon = if is_video { "\u{1F3AC}" } else { "\u{1F3B5}" };
 
                                 if ui.add(egui::Button::new(
-                                    egui::RichText::new(format!(" {} Play {}", icon, media_type))
+                                    egui::RichText::new(format!(" {icon} Play {media_type}"))
                                         .color(egui::Color32::WHITE))
                                         .fill(egui::Color32::from_rgb(76, 175, 80))
                                         .frame(true))
@@ -1546,7 +1738,7 @@ impl eframe::App for RipgrepApp {
                                         })
                                         .unwrap_or_else(|| "default".to_string());
 
-                                    Self::open_with_player(&entry.path, &player_path);
+                                    open_with_player(&entry.path, &player_path);
                                 }
                             });
                         }

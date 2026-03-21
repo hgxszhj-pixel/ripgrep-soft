@@ -31,6 +31,8 @@ notify-debouncer-mini = "0.5"
 rayon = "1.8"
 encoding_rs = "0.8"
 zip = "2.2"
+flate2 = "1.0"
+opener = "0.7"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [

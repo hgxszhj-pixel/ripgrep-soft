@@ -105,3 +105,71 @@ impl AppError {
         Self::Glob(msg.into())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_error_display() {
+        let err = AppError::Parse("invalid format".to_string());
+        assert!(err.to_string().contains("Parse error"));
+
+        let err = AppError::Index("failed to index".to_string());
+        assert!(err.to_string().contains("Index error"));
+
+        let err = AppError::Search("no results".to_string());
+        assert!(err.to_string().contains("Search error"));
+
+        let err = AppError::Config("missing file".to_string());
+        assert!(err.to_string().contains("Configuration error"));
+    }
+
+    #[test]
+    fn test_error_constructors() {
+        let err = AppError::parse("test");
+        assert!(matches!(err, AppError::Parse(_)));
+
+        let err = AppError::index("test");
+        assert!(matches!(err, AppError::Index(_)));
+
+        let err = AppError::search("test");
+        assert!(matches!(err, AppError::Search(_)));
+
+        let err = AppError::config("test");
+        assert!(matches!(err, AppError::Config(_)));
+
+        let err = AppError::ui("test");
+        assert!(matches!(err, AppError::Ui(_)));
+
+        let err = AppError::serialization("test");
+        assert!(matches!(err, AppError::Serialization(_)));
+
+        let err = AppError::path("test");
+        assert!(matches!(err, AppError::Path(_)));
+
+        let err = AppError::regex("test");
+        assert!(matches!(err, AppError::Regex(_)));
+
+        let err = AppError::glob("test");
+        assert!(matches!(err, AppError::Glob(_)));
+    }
+
+    #[test]
+    fn test_error_serialization() {
+        let err = AppError::parse("test error");
+        let json = serde_json::to_string(&err).unwrap();
+        assert!(json.contains("Parse error"));
+    }
+
+    #[test]
+    fn test_result_type() {
+        fn sample_fn() -> Result<i32> {
+            Ok(42)
+        }
+
+        let result: Result<i32> = sample_fn();
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 42);
+    }
+}

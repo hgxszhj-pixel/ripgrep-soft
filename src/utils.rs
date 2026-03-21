@@ -16,7 +16,7 @@ pub fn format_size(bytes: u64) -> String {
     } else if bytes >= KB {
         format!("{:.2} KB", bytes as f64 / KB as f64)
     } else {
-        format!("{} B", bytes)
+        format!("{bytes} B")
     }
 }
 
@@ -197,4 +197,78 @@ pub fn path_to_safe_filename(path: &Path) -> String {
     let mut hasher = DefaultHasher::new();
     path_str.hash(&mut hasher);
     format!("{:x}", hasher.finish())
+}
+
+/// Get the app config directory path
+pub fn get_app_config_dir() -> Option<PathBuf> {
+    dirs::data_local_dir().map(|d| d.join("turbo-search"))
+}
+
+/// Save the last search path to config file
+pub fn save_last_search_path(path: &Path) {
+    if let Some(config_dir) = get_app_config_dir() {
+        if let Err(e) = std::fs::create_dir_all(&config_dir) {
+            eprintln!("Failed to create config directory: {e}");
+            return;
+        }
+        let config_file = config_dir.join("last_path.txt");
+        if let Err(e) = std::fs::write(&config_file, path.to_string_lossy().as_bytes()) {
+            eprintln!("Failed to save last path: {e}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_size() {
+        assert_eq!(format_size(0), "0 B");
+        assert_eq!(format_size(512), "512 B");
+        assert_eq!(format_size(1024), "1.00 KB");
+        assert_eq!(format_size(1536), "1.50 KB");
+        assert_eq!(format_size(1048576), "1.00 MB");
+        assert_eq!(format_size(1073741824), "1.00 GB");
+    }
+
+    #[test]
+    fn test_truncate_path() {
+        assert_eq!(truncate_path("short", 10), "short");
+        assert_eq!(truncate_path("very_long_path", 10), "...ng_path");
+        assert_eq!(truncate_path("exact", 5), "exact");
+    }
+
+    #[test]
+    fn test_is_video_file() {
+        assert!(is_video_file(Path::new("test.mp4")));
+        assert!(is_video_file(Path::new("test.avi")));
+        assert!(is_video_file(Path::new("test.mkv")));
+        assert!(!is_video_file(Path::new("test.txt")));
+        assert!(!is_video_file(Path::new("test.mp3")));
+    }
+
+    #[test]
+    fn test_is_audio_file() {
+        assert!(is_audio_file(Path::new("test.mp3")));
+        assert!(is_audio_file(Path::new("test.wav")));
+        assert!(is_audio_file(Path::new("test.flac")));
+        assert!(!is_audio_file(Path::new("test.txt")));
+        assert!(!is_audio_file(Path::new("test.mp4")));
+    }
+
+    #[test]
+    fn test_path_to_safe_filename() {
+        let result = path_to_safe_filename(Path::new("test/path"));
+        assert!(!result.is_empty());
+        assert_eq!(result.len(), 16); // hex hash
+    }
+
+    #[test]
+    fn test_get_app_config_dir() {
+        let dir = get_app_config_dir();
+        assert!(dir.is_some());
+        let path = dir.unwrap();
+        assert!(path.to_string_lossy().contains("turbo-search"));
+    }
 }

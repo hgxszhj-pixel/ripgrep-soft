@@ -75,7 +75,7 @@ pub fn mode_chip(ui: &mut egui::Ui, mode: &str, is_active: bool) {
     };
 
     ui.label(
-        egui::RichText::new(format!("[{}]", mode))
+        egui::RichText::new(format!("[{mode}]"))
             .small()
             .color(egui::Color32::WHITE)
             .background_color(color),
@@ -180,7 +180,7 @@ pub fn format_size(bytes: u64) -> String {
     } else if bytes >= KB {
         format!("{:.2} KB", bytes as f64 / KB as f64)
     } else {
-        format!("{} B", bytes)
+        format!("{bytes} B")
     }
 }
 
