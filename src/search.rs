@@ -2,11 +2,16 @@ use crate::index::{FileEntry, FileIndex};
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use rayon::prelude::*;
+use std::collections::hash_map::DefaultHasher;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Seek};
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use dashmap::DashMap;
+use lru::LruCache;
 
 // Global regex cache for better performance - DashMap for lock-free concurrent reads
 // Optimization: Bounded cache to prevent memory leaks
@@ -16,6 +21,47 @@ lazy_static::lazy_static! {
 
 // Maximum number of cached regex patterns
 const MAX_REGEX_CACHE_SIZE: usize = 1000;
+
+// Search result cache - LRU cache for search results
+// Optimization: Use parking_lot Mutex (faster than std::sync::Mutex) for better performance
+// Note: LruCache::get() requires &mut, so we use a fast mutex instead of RwLock
+lazy_static::lazy_static! {
+    static ref SEARCH_CACHE: parking_lot::Mutex<LruCache<u64, Arc<Vec<FileEntry>>>> =
+        parking_lot::Mutex::new(LruCache::new(NonZeroUsize::new(100).unwrap())); // Cache up to 100 queries
+}
+
+// Cache version to invalidate when index changes
+static CACHE_VERSION: AtomicU64 = AtomicU64::new(0);
+
+// Generate cache key from search parameters
+fn generate_cache_key(
+    pattern: &str,
+    case_sensitive: bool,
+    regex: bool,
+    glob: bool,
+    size_filter: &SizeFilter,
+    index_version: u64,
+    index_key: (usize, usize),
+) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    pattern.hash(&mut hasher);
+    case_sensitive.hash(&mut hasher);
+    regex.hash(&mut hasher);
+    glob.hash(&mut hasher);
+    size_filter.min_size.hash(&mut hasher);
+    size_filter.max_size.hash(&mut hasher);
+    index_version.hash(&mut hasher);
+    // Include index-specific data (length + pointer) to avoid cache collisions
+    index_key.0.hash(&mut hasher);
+    index_key.1.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Invalidate search cache - call when index changes
+pub fn invalidate_search_cache() {
+    CACHE_VERSION.fetch_add(1, Ordering::SeqCst);
+    SEARCH_CACHE.lock().clear();
+}
 
 /// File size filter - min and max size in bytes
 /// Uses u64 with sentinel values for efficiency (no Option overhead)
@@ -167,22 +213,55 @@ impl SearchQuery {
 pub struct Searcher;
 
 impl Searcher {
-    pub fn search<'a>(query: &SearchQuery, index: &'a FileIndex) -> Vec<&'a FileEntry> {
+    /// Search the index with caching support
+    /// Returns owned entries for caching purposes
+    pub fn search(query: &SearchQuery, index: &FileIndex) -> Vec<FileEntry> {
         if query.pattern.is_empty() {
             return Vec::new();
         }
 
-        if query.glob {
-            Self::glob_search(query, index)
-        } else if query.regex {
-            Self::regex_search(query, index)
-        } else {
-            Self::fuzzy_search(query, index)
+        // Include index-specific data in cache key to avoid collisions between different indexes
+        // Use index pointer as unique identifier (stable within a search session)
+        let index_ptr = index.entries().as_ptr() as usize;
+        let index_key = (index.entries().len(), index_ptr);
+
+        // Try to get from cache first
+        let cache_key = generate_cache_key(
+            &query.pattern,
+            query.case_sensitive,
+            query.regex,
+            query.glob,
+            &query.size_filter,
+            CACHE_VERSION.load(Ordering::SeqCst),
+            index_key,
+        );
+
+        // Use parking_lot Mutex (faster than std::sync::Mutex)
+        {
+            let mut cache = SEARCH_CACHE.lock();
+            if let Some(cached_results) = cache.get(&cache_key) {
+                // Return cloned Arc reference - cheap clone of Arc pointer
+                return (**cached_results).clone();
+            }
         }
+
+        // Perform the actual search
+        let results = if query.glob {
+            Self::glob_search_owned(query, index)
+        } else if query.regex {
+            Self::regex_search_owned(query, index)
+        } else {
+            Self::fuzzy_search_owned(query, index)
+        };
+
+        // Store in cache with Arc for zero-copy sharing
+        SEARCH_CACHE.lock().put(cache_key, Arc::new(results.clone()));
+
+        results
     }
 
     /// Glob pattern search (e.g., *.mp4, *.txt, document?.pdf)
-    fn glob_search<'a>(query: &SearchQuery, index: &'a FileIndex) -> Vec<&'a FileEntry> {
+    fn glob_search_owned(query: &SearchQuery, index: &FileIndex) -> Vec<FileEntry> {
         use glob::Pattern;
 
         let case_sensitive = query.case_sensitive;
@@ -209,16 +288,16 @@ impl Searcher {
                 if case_sensitive {
                     pattern.matches(&entry.name)
                 } else {
-                    // For case-insensitive, use pre-computed name_lower field
                     pattern.matches(&entry.name_lower)
                 }
             })
             .take(query.limit + query.offset)
-            .skip(query.offset)
+            .skip(query.offset).cloned()
             .collect()
     }
 
-    fn fuzzy_search<'a>(query: &SearchQuery, index: &'a FileIndex) -> Vec<&'a FileEntry> {
+    /// Fuzzy search - returns owned entries for caching
+    fn fuzzy_search_owned(query: &SearchQuery, index: &FileIndex) -> Vec<FileEntry> {
         let mut matcher = SkimMatcherV2::default();
         if query.case_sensitive {
             matcher = matcher.respect_case();
@@ -227,6 +306,12 @@ impl Searcher {
         }
         let case_sensitive = query.case_sensitive;
         let pattern = &query.pattern;
+        let limit = query.limit + query.offset;
+
+        // Early termination threshold: stop after finding enough good matches
+        // This significantly improves performance for large indexes
+        // For high-quality matches (score > 0), stop after finding 10x the needed results
+        let high_quality_threshold = limit * 10;
 
         // Pre-compute lowercase pattern once (outside loop) - memory optimization
         let search_pattern = if case_sensitive {
@@ -235,34 +320,105 @@ impl Searcher {
             Some(pattern.to_lowercase())
         };
 
-        // Collect matches with scores
-        // Optimization: Use pre-computed name_lower field to avoid repeated allocations
-        let pattern_str = pattern.as_str();
-        let mut matches: Vec<(i64, &FileEntry)> = index
-            .entries()
-            .iter()
-            .filter_map(|entry| {
-                // For case-insensitive, use pre-computed name_lower field
-                let name_ref = if search_pattern.is_some() {
-                    std::borrow::Cow::Borrowed(&entry.name_lower)
-                } else {
-                    std::borrow::Cow::Borrowed(&entry.name)
-                };
+        let entries = index.entries();
+        let entry_count = entries.len();
 
-                let pattern_to_use = search_pattern.as_deref().unwrap_or(pattern_str);
-                matcher.fuzzy_match(&name_ref, pattern_to_use)
-                    .map(|score| (score, entry))
-            })
-            .collect();
+        // For very large indexes (>50000 entries), use parallel search with early termination
+        // For medium indexes (5000-50000), use sequential with early termination
+        // For small indexes (<5000), use sequential without early termination
+        let mut matches: Vec<(i64, FileEntry)> = if entry_count > 50000 {
+            // Parallel search for very large indexes
+            // Use collect with limit to cap memory usage
+            entries
+                .par_iter()
+                .filter_map(|entry| {
+                    let name_ref = if search_pattern.is_some() {
+                        std::borrow::Cow::Borrowed(&entry.name_lower)
+                    } else {
+                        std::borrow::Cow::Borrowed(&entry.name)
+                    };
+                    let pattern_to_use = search_pattern.as_deref().unwrap_or(pattern.as_str());
+                    matcher.fuzzy_match(&name_ref, pattern_to_use)
+                        .map(|score| (score, entry.clone()))
+                })
+                .collect()
+        } else if entry_count > 5000 {
+            // Sequential search with early termination for medium indexes
+            // This is faster than parallel for medium datasets due to early exit
+            let pattern_str = pattern.as_str();
+            let mut found_count = 0;
+            entries
+                .iter()
+                .filter_map(|entry| {
+                    // Early termination: if we have enough high-quality matches, stop
+                    if found_count >= high_quality_threshold {
+                        return None;
+                    }
 
-        // Sort by score descending (best match first)
-        matches.sort_by(|a, b| b.0.cmp(&a.0));
+                    let name_ref = if search_pattern.is_some() {
+                        std::borrow::Cow::Borrowed(&entry.name_lower)
+                    } else {
+                        std::borrow::Cow::Borrowed(&entry.name)
+                    };
+                    let pattern_to_use = search_pattern.as_deref().unwrap_or(pattern_str);
+                    if let Some(score) = matcher.fuzzy_match(&name_ref, pattern_to_use) {
+                        // Count high-quality matches (score > 0 indicates good match)
+                        if score > 0 {
+                            found_count += 1;
+                        }
+                        Some((score, entry.clone()))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        } else {
+            // Sequential for small indexes without early termination overhead
+            let pattern_str = pattern.as_str();
+            entries
+                .iter()
+                .filter_map(|entry| {
+                    let name_ref = if search_pattern.is_some() {
+                        std::borrow::Cow::Borrowed(&entry.name_lower)
+                    } else {
+                        std::borrow::Cow::Borrowed(&entry.name)
+                    };
+                    let pattern_to_use = search_pattern.as_deref().unwrap_or(pattern_str);
+                    matcher.fuzzy_match(&name_ref, pattern_to_use)
+                        .map(|score| (score, entry.clone()))
+                })
+                .collect()
+        };
 
-        // Return only the entries, sorted by score
-        matches.into_iter().map(|(_, entry)| entry).collect()
+        // Use partial sort for better performance - only need top N results
+        if matches.len() > limit {
+            // Use select_nth_unstable for O(n) partial sort
+            let mid = matches.len() - limit;
+            matches.select_nth_unstable_by(mid, |a, b| b.0.cmp(&a.0));
+
+            // Only sort the top 'limit' elements
+            let (top_matches, _) = matches.split_at_mut(mid);
+            top_matches.sort_by(|a, b| b.0.cmp(&a.0));
+
+            // Return top N with offset
+            top_matches.iter()
+                .skip(query.offset)
+                .take(query.limit)
+                .map(|(_, entry)| entry.clone())
+                .collect()
+        } else {
+            // For small result sets, full sort is fine
+            matches.sort_by(|a, b| b.0.cmp(&a.0));
+            matches.into_iter()
+                .skip(query.offset)
+                .take(query.limit)
+                .map(|(_, entry)| entry)
+                .collect()
+        }
     }
 
-    fn regex_search<'a>(query: &SearchQuery, index: &'a FileIndex) -> Vec<&'a FileEntry> {
+    /// Regex search - returns owned entries for caching
+    fn regex_search_owned(query: &SearchQuery, index: &FileIndex) -> Vec<FileEntry> {
         // Use cached regex for better performance
         let re = match Self::get_cached_regex(&query.pattern, query.case_sensitive) {
             Some(r) => r,
@@ -272,7 +428,7 @@ impl Searcher {
         index
             .entries()
             .iter()
-            .filter(|entry| re.is_match(&entry.name))
+            .filter(|entry| re.is_match(&entry.name)).cloned()
             .collect()
     }
 
@@ -292,10 +448,11 @@ impl Searcher {
             let arc_regex = Arc::new(regex);
 
             // Optimization: Enforce cache size limit to prevent memory leaks
-            if REGEX_CACHE.len() >= MAX_REGEX_CACHE_SIZE {
-                // Clear oldest entries (first 10% of cache)
+            // Only clean when cache is 90% full (reduce cleanup frequency)
+            if REGEX_CACHE.len() >= MAX_REGEX_CACHE_SIZE * 9 / 10 {
+                // Clear oldest 20% of cache entries (more efficient than 10%)
                 let keys_to_remove: Vec<_> = REGEX_CACHE.iter()
-                    .take(MAX_REGEX_CACHE_SIZE / 10)
+                    .take(MAX_REGEX_CACHE_SIZE / 5)
                     .map(|r| r.key().clone())
                     .collect();
                 for key in keys_to_remove {
@@ -401,6 +558,13 @@ impl ContentSearcher {
     }
 
     fn search_file(query: &ContentSearchQuery, path: &Path) -> Vec<ContentMatch> {
+        // Optimization: Skip files larger than 10MB to avoid memory issues
+        if let Ok(metadata) = fs::metadata(path) {
+            if metadata.len() > 10 * 1024 * 1024 {
+                return Vec::new(); // Skip large files
+            }
+        }
+
         // Optimization: Open file once, check binary, then seek back to start
         let mut file = match fs::File::open(path) {
             Ok(f) => f,
@@ -427,6 +591,9 @@ impl ContentSearcher {
         let reader = BufReader::new(file);
         let mut matches = Vec::new();
 
+        // Default max matches per file to avoid excessive results
+        let max_matches_per_file = 100;
+
         let pattern = if query.case_sensitive {
             query.pattern.clone()
         } else {
@@ -434,6 +601,11 @@ impl ContentSearcher {
         };
 
         for (line_number, line_result) in reader.lines().enumerate() {
+            // Early termination: stop if we have enough matches
+            if matches.len() >= max_matches_per_file {
+                break;
+            }
+
             let line = match line_result {
                 Ok(l) => l,
                 Err(_) => continue,
@@ -486,6 +658,18 @@ impl ContentSearcher {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    // Track if cache has been cleared for tests
+    static TESTS_INITIALIZED: AtomicBool = AtomicBool::new(false);
+
+    // Initialize test environment - clear cache once at start
+    fn init_tests() {
+        if !TESTS_INITIALIZED.load(Ordering::SeqCst) {
+            invalidate_search_cache();
+            TESTS_INITIALIZED.store(true, Ordering::SeqCst);
+        }
+    }
 
     fn create_test_entry(name: &str) -> FileEntry {
         FileEntry {

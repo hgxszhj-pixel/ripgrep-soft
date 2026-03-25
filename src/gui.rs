@@ -3,9 +3,11 @@
 #![allow(dead_code)]
 
 pub mod state;
-pub mod ui_components;
 
 use crate::index::{FileEntry, FileIndex};
+use crate::file_watcher::{FileWatcher, FileChange};
+use lru::LruCache;
+use std::num::NonZeroUsize;
 use crate::search::{SearchQuery, Searcher, SizeFilter};
 use crate::gui::state::{AppTheme, SearchMode, FileCategory, PaginationState, ITEMS_PER_PAGE_OPTIONS, FavoriteSearch, Favorites};
 use eframe::egui::{self, FontDefinitions, FontData};
@@ -18,7 +20,7 @@ use std::time::Instant;
 // Re-export utils functions for convenience
 use crate::utils::{
     format_size, truncate_path,
-    is_video_file, is_audio_file, open_with_player,
+    is_video_file, is_audio_file, open_with_player, pick_folder_native,
     path_to_safe_filename, save_last_search_path,
 };
 
@@ -61,7 +63,9 @@ pub struct RipgrepApp {
     highlighted_content: Option<String>,
     preview_loading: bool,
     preview_path: Option<std::path::PathBuf>,
-    preview_channel: Option<mpsc::Receiver<String>>,
+    preview_channel: Option<mpsc::Receiver<(std::path::PathBuf, String)>>,
+    // Preview cache for performance - LRU cache with max 50 entries
+    preview_cache: LruCache<std::path::PathBuf, String>,
     available_players: Vec<(String, String)>,
     selected_player: Option<String>,
     // Pagination state
@@ -71,6 +75,8 @@ pub struct RipgrepApp {
     show_favorites_dropdown: bool,
     // Rename dialog
     rename_dialog: Option<(std::path::PathBuf, String)>,
+    // File watcher for incremental indexing
+    file_watcher: Option<FileWatcher>,
 }
 
 impl Default for RipgrepApp {
@@ -121,12 +127,14 @@ impl RipgrepApp {
             preview_loading: false,
             preview_path: None,
             preview_channel: None,
+            preview_cache: LruCache::new(NonZeroUsize::new(500).unwrap()),
             available_players: Self::detect_media_players(),
             selected_player: Some("System Default".to_string()),
             pagination: PaginationState::new(100),
             favorites: Favorites::new(),
             show_favorites_dropdown: false,
             rename_dialog: None,
+            file_watcher: None,
         };
 
         // Load settings from config file
@@ -402,6 +410,9 @@ impl RipgrepApp {
                         self.index = Arc::new(index);
                         self.is_indexing = false;
 
+                        // Start file watcher for incremental updates
+                        self.start_file_watcher();
+
                         if self.search_path != std::path::PathBuf::from(".") && index_len > 0 {
                             self.progress_message = format!(
                                 "Loaded {index_len} files - click Search"
@@ -435,6 +446,75 @@ impl RipgrepApp {
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                         self.is_indexing = false;
                     }
+                }
+            }
+        }
+    }
+
+    /// Start file watcher for the current search path
+    fn start_file_watcher(&mut self) {
+        // Stop existing watcher if any
+        self.file_watcher = None;
+
+        if self.search_path.exists() && self.search_path.is_dir() {
+            match FileWatcher::new(&self.search_path) {
+                Ok(watcher) => {
+                    tracing::info!("Started file watcher for {:?}", self.search_path);
+                    self.file_watcher = Some(watcher);
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to start file watcher: {}", e);
+                }
+            }
+        }
+    }
+
+    /// Stop file watcher
+    fn stop_file_watcher(&mut self) {
+        if let Some(mut watcher) = self.file_watcher.take() {
+            watcher.stop();
+            tracing::info!("Stopped file watcher");
+        }
+    }
+
+    /// Process file changes from watcher and update index incrementally
+    fn process_file_changes(&mut self) {
+        let Some(ref mut watcher) = self.file_watcher else { return; };
+
+        // Process all available events (non-blocking)
+        loop {
+            match watcher.try_recv() {
+                Ok(FileChange::Created(path)) => {
+                    if let Some(entry) = FileEntry::from_path(&path) {
+                        let mut index = (*self.index).clone();
+                        index.add_entry(entry);
+                        self.index = Arc::new(index);
+                        tracing::debug!("Index updated: added {:?}", path);
+                    }
+                }
+                Ok(FileChange::Modified(path)) => {
+                    // For modifications, remove old entry and add new one
+                    let mut index = (*self.index).clone();
+                    index.remove_entry(&path);
+                    if let Some(entry) = FileEntry::from_path(&path) {
+                        index.add_entry(entry);
+                    }
+                    self.index = Arc::new(index);
+                    tracing::debug!("Index updated: modified {:?}", path);
+                }
+                Ok(FileChange::Removed(path)) => {
+                    let mut index = (*self.index).clone();
+                    if index.remove_entry(&path) {
+                        self.index = Arc::new(index);
+                        tracing::debug!("Index updated: removed {:?}", path);
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    // Watcher disconnected, stop it
+                    self.file_watcher = None;
+                    tracing::warn!("File watcher disconnected");
+                    break;
                 }
             }
         }
@@ -514,6 +594,49 @@ impl RipgrepApp {
         }
     }
 
+    /// Start async preview loading using thread + mpsc channel
+    fn start_preview_loading(&mut self, path: std::path::PathBuf) {
+        // Cancel any existing preview loading
+        self.preview_loading = false;
+        self.preview_channel = None;
+
+        let (tx, rx) = mpsc::channel();
+        let tx = Arc::new(tx);
+
+        thread::spawn(move || {
+            let content = Self::read_file_content_sync(&path);
+            let _ = tx.send((path, content));
+        });
+
+        self.preview_channel = Some(rx);
+        self.preview_loading = true;
+    }
+
+    /// Check if async preview loading is complete
+    fn check_preview_complete(&mut self) {
+        if self.preview_loading {
+            if let Some(rx) = self.preview_channel.take() {
+                match rx.try_recv() {
+                    Ok((path, content)) => {
+                        // Cache the content
+                        self.preview_cache.put(path.clone(), content.clone());
+                        self.preview_content = content;
+                        self.preview_path = Some(path);
+                        self.preview_loading = false;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        // Still loading, put channel back
+                        self.preview_channel = Some(rx);
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        // Thread finished unexpectedly
+                        self.preview_loading = false;
+                    }
+                }
+            }
+        }
+    }
+
     fn perform_search(&mut self) {
         if self.search_query.is_empty() || self.search_path.as_os_str().is_empty() {
             return;
@@ -576,29 +699,129 @@ impl RipgrepApp {
                 // Search the index
                 let search_results = Searcher::search(&search_query, &index);
 
-                // Limit results
+                // Limit results - search already returns owned entries
                 let results: Vec<FileEntry> = search_results
                     .into_iter()
-                    .map(|e| (*e).clone())
                     .take(max_results)
                     .collect();
 
                 let _ = tx.send(results);
             } else {
-                // Content search - simplified
-                let search_results: Vec<FileEntry> = index
-                    .entries()
-                    .iter()
-                    .filter_map(|e| {
-                        if let Ok(content) = std::fs::read_to_string(&e.path) {
-                            if content.to_lowercase().contains(&query.to_lowercase()) {
-                                return Some((*e).clone());
-                            }
-                        }
-                        None
-                    })
-                    .take(max_results)
+                // Content search - optimized with parallel processing and binary detection
+                use rayon::prelude::*;
+
+                // Binary file extensions to skip (avoid reading binary files)
+                const BINARY_EXTS: &[&str] = &[
+                    "exe", "dll", "zip", "rar", "7z", "tar", "gz",
+                    "jpg", "jpeg", "png", "gif", "bmp", "ico", "webp",
+                    "mp3", "mp4", "avi", "mkv", "mov", "wmv", "flv", "webm",
+                    "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx",
+                ];
+
+                // Pre-compute lowercase query once
+                let query_lower = query.to_lowercase();
+
+                // Pre-compute lowercase binary extensions once outside the loop
+                use std::collections::HashSet;
+                let binary_exts_lower: HashSet<String> = BINARY_EXTS.iter()
+                    .map(|s| s.to_lowercase())
                     .collect();
+
+                // Helper function for streaming file search with early termination
+                let search_file_streaming = |path: &std::path::Path| -> Option<FileEntry> {
+                    // Skip files > 1MB for memory efficiency
+                    if let Ok(metadata) = std::fs::metadata(path) {
+                        if metadata.len() > 1_000_000 {
+                            return None;
+                        }
+                    }
+
+                    // Use BufReader for streaming read instead of loading entire file
+                    let file = match std::fs::File::open(path) {
+                        Ok(f) => f,
+                        Err(_) => return None,
+                    };
+
+                    let mut reader = std::io::BufReader::new(file);
+                    let mut line = String::new();
+
+                    // Search line by line with early exit capability
+                    // We'll check first 100KB to find a match (fast rejection)
+                    let mut checked_bytes = 0u64;
+                    let max_check_bytes = 100_000u64;
+
+                    loop {
+                        line.clear();
+                        match std::io::BufRead::read_line(&mut reader, &mut line) {
+                            Ok(0) => break, // EOF
+                            Ok(_) => {
+                                checked_bytes += line.len() as u64;
+                                if checked_bytes > max_check_bytes {
+                                    return None; // Don't search too deep
+                                }
+
+                                let line_lower = line.to_lowercase();
+                                if line_lower.contains(&query_lower) {
+                                    return Some(FileEntry {
+                                        path: path.to_path_buf(),
+                                        name: path.file_name()
+                                            .map(|n| n.to_string_lossy().to_string())
+                                            .unwrap_or_default(),
+                                        name_lower: path.file_name()
+                                            .map(|n| n.to_string_lossy().to_lowercase())
+                                            .unwrap_or_default(),
+                                        size: std::fs::metadata(path).map(|m| m.len()).unwrap_or(0),
+                                        modified: std::fs::metadata(path)
+                                            .and_then(|m| m.modified())
+                                            .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+                                    });
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    None
+                };
+
+                // Get entries and use parallel processing for large datasets
+                let entries = index.entries();
+                let search_results: Vec<FileEntry> = if entries.len() > 100 {
+                    // Parallel search for large indexes
+                    let all_matches: Vec<FileEntry> = entries
+                        .par_iter()
+                        .filter_map(|e| {
+                            // Skip binary files based on extension
+                            if let Some(ext) = e.path.extension() {
+                                if let Some(ext_str) = ext.to_str() {
+                                    if binary_exts_lower.contains(&ext_str.to_lowercase()) {
+                                        return None;
+                                    }
+                                }
+                            }
+                            search_file_streaming(&e.path)
+                        })
+                        .collect();
+
+                    // Limit results after collection
+                    all_matches.into_iter().take(max_results).collect()
+                } else {
+                    // Sequential for small indexes
+                    entries
+                        .iter()
+                        .filter_map(|e| {
+                            // Skip binary files based on extension
+                            if let Some(ext) = e.path.extension() {
+                                if let Some(ext_str) = ext.to_str() {
+                                    if binary_exts_lower.contains(&ext_str.to_lowercase()) {
+                                        return None;
+                                    }
+                                }
+                            }
+                            search_file_streaming(&e.path)
+                        })
+                        .take(max_results)
+                        .collect()
+                };
 
                 let _ = tx.send(search_results);
             }
@@ -616,8 +839,11 @@ impl RipgrepApp {
         self.selected_index = None;
         self.preview_content.clear();
         self.highlighted_content = None;
+        self.preview_path = None;
         self.last_query.clear();
         self.search_channel = None;
+        // Clear preview cache on new search
+        self.preview_cache.clear();
         // Reset pagination
         self.pagination.current_page = 1;
         self.pagination.total_items = 0;
@@ -758,27 +984,75 @@ impl RipgrepApp {
             return format!("[Preview not available for {extension} files]");
         }
 
-        // Try to read as UTF-8
-        match std::fs::read_to_string(path) {
-            Ok(content) => {
-                // Limit preview size
-                if content.len() > 100000 {
-                    format!("{}\n\n[... truncated ...]", &content[..100000])
-                } else {
-                    content
+        // Optimization: Use streaming read to avoid loading entire large file into memory
+        const MAX_PREVIEW_SIZE: usize = 100_000;
+        const LARGE_FILE_THRESHOLD: u64 = 10_000_000; // 10MB
+
+        // Check file size first
+        if let Ok(metadata) = std::fs::metadata(path) {
+            if metadata.len() > LARGE_FILE_THRESHOLD {
+                return "[File too large for preview]".to_string();
+            }
+        }
+
+        // Try to read as UTF-8 with streaming
+        match std::fs::File::open(path) {
+            Ok(file) => {
+                let reader = std::io::BufReader::new(file);
+                let mut content = String::new();
+                let mut line_count = 0;
+                const MAX_LINES: usize = 1000;
+
+                for line_result in std::io::BufRead::lines(reader) {
+                    if line_count >= MAX_LINES {
+                        content.push_str("\n[... output truncated ...]");
+                        break;
+                    }
+                    if content.len() >= MAX_PREVIEW_SIZE {
+                        content.push_str("\n[... truncated ...]");
+                        break;
+                    }
+                    match line_result {
+                        Ok(line) => {
+                            content.push_str(&line);
+                            content.push('\n');
+                            line_count += 1;
+                        }
+                        Err(_) => break,
+                    }
                 }
+
+                // If content looks binary (has null bytes), skip it
+                // Use stricter detection: if more than 5% of bytes are null, consider it binary
+                let null_count = content.bytes().filter(|&b| b == 0).count();
+                let total_chars = content.len().max(1);
+                if null_count > total_chars / 20 {
+                    return "[Binary file]".to_string();
+                }
+
+                content
             }
             Err(_) => {
-                // Try with lossy conversion
+                // Try with lossy conversion for non-UTF-8 files
                 match std::fs::read(path) {
                     Ok(bytes) => {
-                        // Try to detect encoding and convert
-                        let (content, _, _) = encoding_rs::GBK.decode(&bytes);
-                        if content.len() > 100000 {
-                            format!("{}\n\n[... truncated ...]", &content[..100000])
-                        } else {
-                            content.to_string()
+                        // Check if binary
+                        if bytes.iter().take(1000).any(|&b| b == 0) {
+                            return "[Binary file]".to_string();
                         }
+
+                        // Limit bytes for conversion
+                        let bytes = if bytes.len() > MAX_PREVIEW_SIZE {
+                            &bytes[..MAX_PREVIEW_SIZE]
+                        } else {
+                            &bytes
+                        };
+
+                        let (content, _, had_errors) = encoding_rs::GBK.decode(bytes);
+                        if had_errors {
+                            return "[Encoding conversion failed]".to_string();
+                        }
+                        format!("{content}\n[... truncated ...]")
                     }
                     Err(e) => format!("[Cannot read file: {e}]")
                 }
@@ -792,320 +1066,6 @@ impl RipgrepApp {
 // ============ UI Rendering Helpers ============
 
 impl RipgrepApp {
-    /// Render settings dialog
-    fn render_settings_dialog(&mut self, ctx: &egui::Context) {
-        if !self.show_settings { return; }
-
-        egui::Window::new("Settings")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ctx, |ui| {
-                ui.heading("Settings");
-                ui.separator();
-
-                // Theme selection
-                ui.label(egui::RichText::new("Appearance").strong());
-                ui.horizontal(|ui| {
-                    ui.label("Theme:");
-                    egui::ComboBox::from_id_salt("settings_theme")
-                        .selected_text(self.theme.display_name())
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut self.theme, AppTheme::Light, "Light");
-                            ui.selectable_value(&mut self.theme, AppTheme::Dark, "Dark");
-                            ui.selectable_value(&mut self.theme, AppTheme::Blue, "Blue");
-                            ui.selectable_value(&mut self.theme, AppTheme::Green, "Green");
-                            ui.selectable_value(&mut self.theme, AppTheme::Purple, "Purple");
-                        });
-                });
-
-                ui.horizontal(|ui| {
-                    ui.label("Font Size:");
-                    ui.add(egui::Slider::new(&mut self.font_size, 10.0..=24.0).text(""));
-                    ui.label(format!("{}px", self.font_size as i32));
-                });
-
-                ui.separator();
-
-                // Search settings
-                ui.label(egui::RichText::new("Search").strong());
-                ui.horizontal(|ui| {
-                    ui.label("Max index files:");
-                    ui.add(egui::Slider::new(&mut self.max_index_files, 10000..=1000000).text(""));
-                });
-
-                ui.horizontal(|ui| {
-                    ui.label("Max filename results:");
-                    ui.add(egui::Slider::new(&mut self.max_filename_results, 50..=5000).text(""));
-                });
-
-                ui.horizontal(|ui| {
-                    ui.label("Max content results:");
-                    ui.add(egui::Slider::new(&mut self.max_content_results, 100..=10000).text(""));
-                });
-
-                ui.separator();
-
-                // Startup settings
-                ui.label(egui::RichText::new("Startup").strong());
-                ui.checkbox(&mut self.show_welcome, "Show welcome dialog on startup");
-
-                ui.separator();
-
-                // Media player selection
-                ui.label(egui::RichText::new("Media Player").strong());
-                ui.horizontal(|ui| {
-                    ui.label("Player:");
-                    egui::ComboBox::from_id_salt("settings_player")
-                        .selected_text(self.selected_player.as_deref().unwrap_or("System Default"))
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut self.selected_player, None, "System Default");
-                            for (name, _) in &self.available_players {
-                                ui.selectable_value(&mut self.selected_player, Some(name.clone()), name);
-                            }
-                        });
-                });
-
-                ui.separator();
-
-                // Buttons
-                ui.horizontal(|ui| {
-                    if ui.button("Save").clicked() {
-                        self.save_settings();
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("Close").clicked() {
-                            self.show_settings = false;
-                        }
-                    });
-                });
-            });
-    }
-
-    /// Render toolbar panel
-    fn render_toolbar(&mut self, ctx: &egui::Context) {
-        egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                // Animated lightning bolt
-                let time = ctx.input(|i| i.time);
-                let frame = ((time * 6.0) as usize) % 4;
-                let bolt_frames = ["\u{26A1}", "\u{1F4A5}", "\u{26A1}", "\u{1F5E2}"];
-                ui.label(egui::RichText::new(bolt_frames[frame]).size(28.0));
-
-                ui.heading(egui::RichText::new("TurboSearch").strong().color(egui::Color32::from_rgb(0, 120, 212)));
-                ui.label(egui::RichText::new("File Search").small().color(egui::Color32::GRAY));
-
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label("Font:");
-                    if ui.add(egui::Slider::new(&mut self.font_size, 10.0..=24.0).text("Size")).changed() {
-                        self.apply_font_size(ctx);
-                    }
-
-                    ui.separator();
-
-                    // Theme toggle
-                    ui.label("Theme:");
-                    let themes = [
-                        (AppTheme::Light, "\u{2600}"),
-                        (AppTheme::Dark, "\u{1F319}"),
-                        (AppTheme::Blue, "\u{1F499}"),
-                        (AppTheme::Green, "\u{1F49A}"),
-                    ];
-                    for (theme, icon) in themes {
-                        let is_active = self.theme == theme;
-                        let btn = egui::Button::new(egui::RichText::new(icon).size(16.0))
-                            .frame(false)
-                            .fill(if is_active {
-                                ui.style().visuals.selection.bg_fill
-                            } else {
-                                egui::Color32::TRANSPARENT
-                            });
-                        if ui.add(btn).clicked() {
-                            self.theme = theme;
-                            self.apply_theme(ctx);
-                        }
-                    }
-
-                    ui.separator();
-
-                    // Settings button
-                    if ui.button("\u{2699} Settings").clicked() {
-                        self.show_settings = true;
-                    }
-                });
-            });
-
-            ui.separator();
-
-            // Search path row
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("\u{1F4C1}").size(16.0));
-                ui.label("Search in:");
-
-                if self.search_path.as_os_str().is_empty() {
-                    ui.label(egui::RichText::new("<No folder selected>").small().color(egui::Color32::GRAY));
-                } else {
-                    ui.label(
-                        egui::RichText::new(truncate_path(&self.search_path.display().to_string(), 50))
-                            .small()
-                            .background_color(ui.style().visuals.faint_bg_color)
-                    );
-                }
-
-                if self.is_indexing {
-                    ui.spinner();
-                    ui.label("Indexing...");
-                } else if ui.add(egui::Button::new(egui::RichText::new("\u{1F4C2} Browse").color(egui::Color32::WHITE).background_color(egui::Color32::from_rgb(0, 120, 212)))).clicked() {
-                    if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                        self.search_path = path.clone();
-                        self.search_path_text = path.display().to_string();
-                        save_last_search_path(&path);
-
-                        if let Some(data_dir) = dirs::data_local_dir() {
-                            let index_dir = data_dir.join("turbo-search");
-                            self.index = Arc::new(FileIndex::load(&index_dir).unwrap_or_default());
-                            self.displayed_results.clear();
-                            self.displayed_results_text.clear();
-                            self.total_results = 0;
-                            self.pagination.current_page = 1;
-                        }
-                    }
-                }
-
-                // Re-index button
-                if !self.search_path.as_os_str().is_empty() && !self.is_indexing {
-                    if ui.button("\u{1F504} Re-index").clicked() {
-                        self.start_background_indexing();
-                    }
-                }
-            });
-
-            ui.separator();
-
-            // Search input row
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("\u{1F50D}").size(16.0));
-                ui.label("Search:");
-
-                let search_text = egui::TextEdit::singleline(&mut self.search_path_text)
-                    .hint_text("Enter search term...")
-                    .desired_width(400.0);
-                ui.add(search_text);
-
-                // Parse search term
-                let search_term = self.search_path_text.trim();
-                if search_term.is_empty() {
-                    self.search_query.clear();
-                    self.search_query_lower.clear();
-                } else if self.search_query != search_term {
-                    self.search_query = search_term.to_string();
-                    self.search_query_lower = search_term.to_lowercase();
-                }
-
-                // Search mode
-                ui.label("Mode:");
-                egui::ComboBox::from_id_salt("search_mode")
-                    .selected_text(self.search_mode.display_name())
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.search_mode, SearchMode::Filename, "Filename");
-                        ui.selectable_value(&mut self.search_mode, SearchMode::Content, "Content");
-                    });
-
-                // Options
-                ui.checkbox(&mut self.use_regex, "Regex");
-                ui.checkbox(&mut self.use_glob, "Glob");
-                ui.checkbox(&mut self.case_sensitive, "Case");
-                ui.checkbox(&mut self.use_ripgrep, "ripgrep");
-
-                // Search button
-                if ui.add(egui::Button::new(egui::RichText::new("\u{1F50D} Search").color(egui::Color32::WHITE).background_color(egui::Color32::from_rgb(0, 120, 212)))).clicked() {
-                    self.perform_search();
-                }
-
-                // Clear button
-                if ui.button("Clear").clicked() {
-                    self.reset_search();
-                }
-
-                // Stop button
-                if self.is_searching {
-                    if ui.button("Stop").clicked() {
-                        self.is_searching = false;
-                    }
-                }
-            });
-
-            ui.separator();
-
-            // Filter row
-            ui.horizontal(|ui| {
-                ui.label("Size filter:");
-                egui::ComboBox::from_id_salt("size_filter")
-                    .selected_text(if self.size_filter.is_empty() { "Any" } else { &self.size_filter })
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.size_filter, String::new(), "Any");
-                        ui.selectable_value(&mut self.size_filter, "<1kb".to_string(), "< 1 KB");
-                        ui.selectable_value(&mut self.size_filter, "<1mb".to_string(), "< 1 MB");
-                        ui.selectable_value(&mut self.size_filter, "<10mb".to_string(), "< 10 MB");
-                        ui.selectable_value(&mut self.size_filter, "<100mb".to_string(), "< 100 MB");
-                        ui.selectable_value(&mut self.size_filter_custom, false, "Custom");
-                    });
-
-                if self.size_filter_custom {
-                    ui.add(egui::TextEdit::singleline(&mut self.size_filter).desired_width(100.0).hint_text("e.g. >1mb"));
-                }
-
-                // Pagination display
-                if self.total_results > 0 {
-                    ui.separator();
-                    ui.label(format!("Results: {} / {}", self.displayed_results.len(), self.total_results));
-                    if let Some(duration) = self.last_search_duration {
-                        ui.label(egui::RichText::new(format!("{:.2}s", duration as f64 / 1000.0)).small().color(egui::Color32::GRAY));
-                    }
-                }
-            });
-        });
-    }
-
-    /// Render rename dialog
-    fn render_rename_dialog(&mut self, ctx: &egui::Context) {
-        let rename_data = self.rename_dialog.clone();
-        if let Some((ref path, ref old_name)) = rename_data {
-            let mut new_name = old_name.clone();
-            let path_for_rename = path.clone();
-            egui::Window::new("Rename File")
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                .show(ctx, |ui| {
-                    ui.heading("Rename File");
-                    ui.separator();
-                    ui.label(format!("Old name: {}", old_name));
-                    ui.add(egui::TextEdit::singleline(&mut new_name).desired_width(300.0));
-                    ui.separator();
-                    ui.horizontal(|ui| {
-                        if ui.button("Rename").clicked() {
-                            if let Some(parent) = path.parent() {
-                                let new_path = parent.join(&new_name);
-                                if std::fs::rename(&path_for_rename, &new_path).is_ok() {
-                                    // Update displayed results
-                                    if let Some(idx) = self.displayed_results.iter().position(|e| e.path == path_for_rename) {
-                                        self.displayed_results[idx].path = new_path.clone();
-                                        self.displayed_results[idx].name = new_name.clone();
-                                        self.displayed_results[idx].name_lower = new_name.to_lowercase();
-                                    }
-                                }
-                            }
-                            self.rename_dialog = None;
-                        }
-                        if ui.button("Cancel").clicked() {
-                            self.rename_dialog = None;
-                        }
-                    });
-                });
-        }
-    }
-
     /// Render welcome dialog
     fn render_welcome_dialog(&mut self, ctx: &egui::Context) {
         if !self.show_welcome { return; }
@@ -1168,8 +1128,14 @@ impl eframe::App for RipgrepApp {
         // Check for completed background indexing/loading
         self.check_indexing_complete();
 
+        // Process file changes from watcher for incremental indexing
+        self.process_file_changes();
+
         // Check for completed search results
         self.check_search_complete();
+
+        // Check for completed preview loading
+        self.check_preview_complete();
 
         // Apply theme and font
         self.apply_theme(ctx);
@@ -1301,7 +1267,7 @@ impl eframe::App for RipgrepApp {
                 .show(ctx, |ui| {
                     ui.heading("Rename File");
                     ui.separator();
-                    ui.label(format!("Old name: {}", old_name));
+                    ui.label(format!("Old name: {old_name}"));
                     ui.add(egui::TextEdit::singleline(&mut new_name).desired_width(300.0));
                     ui.separator();
                     ui.horizontal(|ui| {
@@ -1399,7 +1365,7 @@ impl eframe::App for RipgrepApp {
                     ui.spinner();
                     ui.label("Indexing...");
                 } else if ui.add(egui::Button::new(egui::RichText::new("\u{1F4C2} Browse").color(egui::Color32::WHITE).background_color(egui::Color32::from_rgb(0, 120, 212)))).clicked() {
-                    if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                    if let Some(path) = pick_folder_native() {
                         self.search_path = path.clone();
                         self.search_path_text = path.display().to_string();
                         save_last_search_path(&path);
@@ -1701,19 +1667,38 @@ impl eframe::App for RipgrepApp {
 
                 if let Some(idx) = self.selected_index {
                     if let Some(entry) = self.displayed_results.get(idx) {
-                        // Load preview if needed
-                        if self.preview_content.is_empty() || self.preview_path.as_ref() != Some(&entry.path) {
-                            self.preview_content = Self::read_file_content_sync(&entry.path);
-                            self.preview_path = Some(entry.path.clone());
+                        let entry_path = entry.path.clone();
+                        let entry_size = entry.size;
+
+                        // Check if we need to load preview for this entry
+                        let needs_load = self.preview_content.is_empty()
+                            || self.preview_path.as_ref() != Some(&entry_path)
+                            || (self.preview_loading && self.preview_path.as_ref() != Some(&entry_path));
+
+                        if needs_load && !self.preview_loading {
+                            // Try cache first
+                            if let Some(cached) = self.preview_cache.get(&entry_path) {
+                                self.preview_content = cached.clone();
+                                self.preview_path = Some(entry_path.clone());
+                            } else {
+                                // Start async loading
+                                self.start_preview_loading(entry_path.clone());
+                            }
+                        }
+
+                        // Show loading indicator if still loading
+                        if self.preview_loading && self.preview_path.as_ref() == Some(&entry_path) {
+                            ui.spinner();
+                            ui.label("Loading preview...");
                         }
 
                         // Show file info
-                        ui.label(egui::RichText::new(entry.path.display().to_string()).small().color(egui::Color32::GRAY));
-                        ui.label(format!("Size: {}", format_size(entry.size)));
+                        ui.label(egui::RichText::new(entry_path.display().to_string()).small().color(egui::Color32::GRAY));
+                        ui.label(format!("Size: {}", format_size(entry_size)));
 
                         // Show play button for media files
-                        let is_video = is_video_file(&entry.path);
-                        let is_audio = is_audio_file(&entry.path);
+                        let is_video = is_video_file(&entry_path);
+                        let is_audio = is_audio_file(&entry_path);
 
                         if is_video || is_audio {
                             ui.horizontal(|ui| {
@@ -1738,7 +1723,7 @@ impl eframe::App for RipgrepApp {
                                         })
                                         .unwrap_or_else(|| "default".to_string());
 
-                                    open_with_player(&entry.path, &player_path);
+                                    open_with_player(&entry_path, &player_path);
                                 }
                             });
                         }

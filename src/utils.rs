@@ -169,6 +169,44 @@ pub fn open_with_player(path: &Path, player_path: &str) {
     }
 }
 
+/// Native Windows folder picker - uses PowerShell to open folder picker dialog
+/// This avoids the rfd crate which can trigger Microsoft Store prompts
+#[cfg(windows)]
+pub fn pick_folder_native() -> Option<PathBuf> {
+    use std::process::Command;
+
+    // Use PowerShell to show folder browser dialog - no Microsoft Store trigger
+    let script = r#"
+Add-Type -AssemblyName System.Windows.Forms
+$dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+$dialog.Description = 'Select a folder to search'
+$dialog.ShowNewFolderButton = $false
+if ($dialog.ShowDialog() -eq 'OK') {
+    Write-Output $dialog.SelectedPath
+}
+"#;
+
+    let output = Command::new("powershell")
+        .args(["-NoProfile", "-Command", script])
+        .output()
+        .ok()?;
+
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !path.is_empty() {
+        Some(PathBuf::from(path))
+    } else {
+        None
+    }
+}
+
+/// Fallback folder picker for non-Windows
+#[cfg(not(windows))]
+pub fn pick_folder_native() -> Option<PathBuf> {
+    // On non-Windows, we could use rfd or native dialogs
+    // For now, return None to indicate no folder was selected
+    None
+}
+
 /// Open file with default system application
 pub fn open_with_default_player(path: &Path) {
     #[cfg(windows)]

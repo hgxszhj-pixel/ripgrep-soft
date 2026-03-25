@@ -12,6 +12,7 @@ pub mod index;
 pub mod logging;
 pub mod search;
 pub mod utils;
+pub mod heartbeat;
 
 #[cfg(windows)]
 pub mod mft_reader;
