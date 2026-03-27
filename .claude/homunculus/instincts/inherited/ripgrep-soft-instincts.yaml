@@ -1,0 +1,616 @@
+# Instincts generated from https://github.com/hgxszhj-pixel/ripgrep-soft
+# Generated: 2026-03-27T07:51:07.575Z
+# Version: 2.0
+# NOTE: This file supplements (does not replace) any existing curated instincts.
+# High-confidence manually curated instincts should be preserved alongside these.
+
+---
+id: ripgrep-soft-commit-conventional
+trigger: "when writing a commit message"
+confidence: 0.85
+domain: git
+source: repo-analysis
+source_repo: https://github.com/hgxszhj-pixel/ripgrep-soft
+---
+
+# Ripgrep Soft Commit Conventional
+
+## Action
+
+Use conventional commit format with prefixes: docs, feat, chore, refactor, perf
+
+## Evidence
+
+- 46 commits analyzed
+- Detected conventional commit pattern
+- Examples: refactor: remove dead code from search.rs and fix file_watcher warnings, test: add file_watcher unit tests (9 new tests)
+
+---
+id: ripgrep-soft-commit-length
+trigger: "when writing a commit message"
+confidence: 0.6
+domain: git
+source: repo-analysis
+source_repo: https://github.com/hgxszhj-pixel/ripgrep-soft
+---
+
+# Ripgrep Soft Commit Length
+
+## Action
+
+Write moderate-length commit messages (~51 characters)
+
+## Evidence
+
+- Average commit message length: 51 chars
+- Based on 46 commits
+
+---
+id: ripgrep-soft-naming-files
+trigger: "when creating a new file"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/hgxszhj-pixel/ripgrep-soft
+---
+
+# Ripgrep Soft Naming Files
+
+## Action
+
+Use camelCase naming convention
+
+## Evidence
+
+- Analyzed file naming patterns in repository
+- Dominant pattern: camelCase
+
+---
+id: ripgrep-soft-import-relative
+trigger: "when importing modules"
+confidence: 0.75
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/hgxszhj-pixel/ripgrep-soft
+---
+
+# Ripgrep Soft Import Relative
+
+## Action
+
+Use relative imports for project files
+
+## Evidence
+
+- Import analysis shows relative import pattern
+- Example: import { x } from '../lib/x'
+
+---
+id: ripgrep-soft-export-style
+trigger: "when exporting from a module"
+confidence: 0.7
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/hgxszhj-pixel/ripgrep-soft
+---
+
+# Ripgrep Soft Export Style
+
+## Action
+
+Prefer named exports
+
+## Evidence
+
+- Export pattern analysis
+- Dominant style: named
+
+---
+id: ripgrep-soft-test-separate
+trigger: "when writing tests"
+confidence: 0.8
+domain: testing
+source: repo-analysis
+source_repo: https://github.com/hgxszhj-pixel/ripgrep-soft
+---
+
+# Ripgrep Soft Test Separate
+
+## Action
+
+Place tests in the tests/ or __tests__/ directory, mirroring src structure
+
+## Evidence
+
+- Separate test directory pattern detected
+- Tests live in dedicated test folders
+
+---
+id: ripgrep-soft-workflow-feature-development
+trigger: "when implementing a new feature"
+confidence: 0.9
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/hgxszhj-pixel/ripgrep-soft
+---
+
+# Ripgrep Soft Workflow Feature Development
+
+## Action
+
+Follow the feature-development workflow:
+1. Add feature implementation
+2. Add tests for feature
+3. Update documentation
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~17x per month
+- Files: src/gui/*, docs/*, **/*.test.*
+
+---
+id: ripgrep-soft-workflow-test-driven-development
+trigger: "when adding new functionality"
+confidence: 0.7
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/hgxszhj-pixel/ripgrep-soft
+---
+
+# Ripgrep Soft Workflow Test Driven Development
+
+## Action
+
+Follow the test-driven-development workflow:
+1. Write failing test
+2. Implement code to pass test
+3. Refactor if needed
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~4x per month
+- Files: **/*.test.*, **/*.spec.*, src/**/*
+
+---
+id: ripgrep-soft-workflow-refactoring
+trigger: "when refactoring code"
+confidence: 0.65
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/hgxszhj-pixel/ripgrep-soft
+---
+
+# Ripgrep Soft Workflow Refactoring
+
+## Action
+
+Follow the refactoring workflow:
+1. Ensure tests pass before refactor
+2. Refactor code structure
+3. Verify tests still pass
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~3x per month
+- Files: src/**/*
+
+---
+id: ripgrep-soft-workflow-feature-development-with-plan-and-summary
+trigger: "when doing feature development with plan and summary"
+confidence: 0.6
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/hgxszhj-pixel/ripgrep-soft
+---
+
+# Ripgrep Soft Workflow Feature Development With Plan And Summary
+
+## Action
+
+Follow the feature-development-with-plan-and-summary workflow:
+1. Create or update a plan file in .planning/quick/{n-feature}/n-PLAN.md
+2. Create or update a summary file in .planning/quick/{n-feature}/n-SUMMARY.md
+3. Update .planning/STATE.md and/or .planning/ROADMAP.md to reflect progress
+4. Implement the feature in relevant src/ files
+5. Commit all related files together
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~2x per month
+- Files: .planning/quick/*/PLAN.md, .planning/quick/*/SUMMARY.md, .planning/STATE.md
+
+---
+id: ripgrep-soft-workflow-gui-feature-addition
+trigger: "when doing gui feature addition"
+confidence: 0.6
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/hgxszhj-pixel/ripgrep-soft
+---
+
+# Ripgrep Soft Workflow Gui Feature Addition
+
+## Action
+
+Follow the gui-feature-addition workflow:
+1. Update or create implementation in src/gui.rs
+2. Update or create state management in src/gui/state.rs
+3. Optionally update PLAN.md with feature details
+4. Commit all related files together
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~2x per month
+- Files: src/gui.rs, src/gui/state.rs, PLAN.md
+
+---
+id: ripgrep-soft-workflow-codebase-refactor-and-dead-code-removal
+trigger: "when doing codebase refactor and dead code removal"
+confidence: 0.6
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/hgxszhj-pixel/ripgrep-soft
+---
+
+# Ripgrep Soft Workflow Codebase Refactor And Dead Code Removal
+
+## Action
+
+Follow the codebase-refactor-and-dead-code-removal workflow:
+1. Identify dead code or unused modules in src/
+2. Remove or refactor code in affected .rs files
+3. Optionally update related plan or documentation files
+4. Commit all related files together
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~2x per month
+- Files: src/*.rs, PERFORMANCE_PLAN.md, WORKFLOW_OPTIMIZATION_PLAN.md
+
+---
+id: ripgrep-soft-workflow-documentation-update-for-new-features
+trigger: "when doing documentation update for new features"
+confidence: 0.6
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/hgxszhj-pixel/ripgrep-soft
+---
+
+# Ripgrep Soft Workflow Documentation Update For New Features
+
+## Action
+
+Follow the documentation-update-for-new-features workflow:
+1. Edit README.md and/or README_CN.md to describe new features
+2. Commit documentation changes
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~2x per month
+- Files: README.md, README_CN.md
+
+---
+id: ripgrep-soft-workflow-project-cleanup-remove-planning-or-build-artifacts
+trigger: "when doing project cleanup remove planning or build artifacts"
+confidence: 0.6
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/hgxszhj-pixel/ripgrep-soft
+---
+
+# Ripgrep Soft Workflow Project Cleanup Remove Planning Or Build Artifacts
+
+## Action
+
+Follow the project-cleanup-remove-planning-or-build-artifacts workflow:
+1. Remove files/directories from git tracking (e.g., .planning/, docs/, target/)
+2. Update .gitignore to exclude these paths
+3. Commit the cleanup
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~2x per month
+- Files: .planning/*, docs/*, target/*
+
+---
+id: ripgrep-soft-instinct-file-naming
+trigger: "When creating a new file in the codebase"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: hgxszhj-pixel/ripgrep-soft
+---
+
+# Ripgrep Soft Instinct File Naming
+
+## Action
+
+Name the file using camelCase (e.g., fileName.rs)
+
+## Evidence
+
+- Pattern in codeStyle.namingConventions.files: camelCase
+
+---
+id: ripgrep-soft-instinct-function-naming
+trigger: "When defining a new function"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: hgxszhj-pixel/ripgrep-soft
+---
+
+# Ripgrep Soft Instinct Function Naming
+
+## Action
+
+Name the function using camelCase (e.g., searchFiles)
+
+## Evidence
+
+- Pattern in codeStyle.namingConventions.functions: camelCase
+
+---
+id: ripgrep-soft-instinct-class-naming
+trigger: "When defining a new class or struct"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: hgxszhj-pixel/ripgrep-soft
+---
+
+# Ripgrep Soft Instinct Class Naming
+
+## Action
+
+Name the class/struct using PascalCase (e.g., FileIndexer)
+
+## Evidence
+
+- Pattern in codeStyle.namingConventions.classes: PascalCase
+
+---
+id: ripgrep-soft-instinct-constant-naming
+trigger: "When defining a constant"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: hgxszhj-pixel/ripgrep-soft
+---
+
+# Ripgrep Soft Instinct Constant Naming
+
+## Action
+
+Name the constant using SCREAMING_SNAKE_CASE (e.g., MAX_RESULTS)
+
+## Evidence
+
+- Pattern in codeStyle.namingConventions.constants: SCREAMING_SNAKE_CASE
+
+---
+id: ripgrep-soft-instinct-import-style
+trigger: "When importing modules in Rust code"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: hgxszhj-pixel/ripgrep-soft
+---
+
+# Ripgrep Soft Instinct Import Style
+
+## Action
+
+Use relative imports
+
+## Evidence
+
+- Pattern in codeStyle.importStyle: relative
+
+---
+id: ripgrep-soft-instinct-export-style
+trigger: "When exporting modules or functions"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: hgxszhj-pixel/ripgrep-soft
+---
+
+# Ripgrep Soft Instinct Export Style
+
+## Action
+
+Use named exports
+
+## Evidence
+
+- Pattern in codeStyle.exportStyle: named
+
+---
+id: ripgrep-soft-instinct-test-location
+trigger: "When adding new tests"
+confidence: 0.8
+domain: testing
+source: repo-analysis
+source_repo: hgxszhj-pixel/ripgrep-soft
+---
+
+# Ripgrep Soft Instinct Test Location
+
+## Action
+
+Place test files in the separate 'tests' directory
+
+## Evidence
+
+- Pattern in architecture.folderStructure.testLocation: separate
+- Files in tests/
+
+---
+id: ripgrep-soft-instinct-test-naming
+trigger: "When naming a test file"
+confidence: 0.8
+domain: testing
+source: repo-analysis
+source_repo: hgxszhj-pixel/ripgrep-soft
+---
+
+# Ripgrep Soft Instinct Test Naming
+
+## Action
+
+Use the .test. or .spec. infix in the filename (e.g., validation.test.ts)
+
+## Evidence
+
+- Pattern in workflows.test-driven-development.filesInvolved: **/*.test.*
+- **/*.spec.*
+
+---
+id: ripgrep-soft-instinct-tdd-sequence
+trigger: "When following test-driven development"
+confidence: 0.8
+domain: testing
+source: repo-analysis
+source_repo: hgxszhj-pixel/ripgrep-soft
+---
+
+# Ripgrep Soft Instinct Tdd Sequence
+
+## Action
+
+First write a failing test, then implement code to pass the test, then refactor if needed
+
+## Evidence
+
+- workflows.test-driven-development.commitSequence
+- Example: test: add tests for user validation → feat: implement user validation
+
+---
+id: ripgrep-soft-instinct-git-commit-format
+trigger: "When making a git commit"
+confidence: 0.9
+domain: git
+source: repo-analysis
+source_repo: hgxszhj-pixel/ripgrep-soft
+---
+
+# Ripgrep Soft Instinct Git Commit Format
+
+## Action
+
+Format the commit message as <type>: <description> using one of [docs, feat, chore, refactor, perf, test] as type
+
+## Evidence
+
+- Pattern in commits.prefixes
+- Example: refactor: remove dead code from search.rs and fix file_watcher warnings
+
+---
+id: ripgrep-soft-instinct-feature-development-with-plan
+trigger: "When adding a significant new feature that requires planning and summary documentation"
+confidence: 0.95
+domain: workflow
+source: repo-analysis
+source_repo: hgxszhj-pixel/ripgrep-soft
+---
+
+# Ripgrep Soft Instinct Feature Development With Plan
+
+## Action
+
+Create or update .planning/quick/{n-feature}/PLAN.md and SUMMARY.md, update .planning/STATE.md or ROADMAP.md, implement feature in src/, and commit all together
+
+## Evidence
+
+- workflows.feature-development-with-plan-and-summary
+- Example commits and files in workflow
+
+---
+id: ripgrep-soft-instinct-gui-feature-addition
+trigger: "When adding a new GUI feature (e.g., pagination, favorites)"
+confidence: 0.9
+domain: workflow
+source: repo-analysis
+source_repo: hgxszhj-pixel/ripgrep-soft
+---
+
+# Ripgrep Soft Instinct Gui Feature Addition
+
+## Action
+
+Update src/gui.rs and src/gui/state.rs, optionally update PLAN.md, and commit all together
+
+## Evidence
+
+- workflows.gui-feature-addition
+- Example commits and files in workflow
+
+---
+id: ripgrep-soft-instinct-codebase-refactor-dead-code
+trigger: "When cleaning up the codebase by removing unused code or modules"
+confidence: 0.9
+domain: workflow
+source: repo-analysis
+source_repo: hgxszhj-pixel/ripgrep-soft
+---
+
+# Ripgrep Soft Instinct Codebase Refactor Dead Code
+
+## Action
+
+Identify and remove dead code in src/*.rs, optionally update plan/docs, and commit all together
+
+## Evidence
+
+- workflows.codebase-refactor-and-dead-code-removal
+- Example: refactor: remove dead code from search.rs and fix file_watcher warnings
+
+---
+id: ripgrep-soft-instinct-documentation-update
+trigger: "When documenting new features or changes for users"
+confidence: 0.85
+domain: workflow
+source: repo-analysis
+source_repo: hgxszhj-pixel/ripgrep-soft
+---
+
+# Ripgrep Soft Instinct Documentation Update
+
+## Action
+
+Edit README.md and/or README_CN.md to describe new features and commit changes
+
+## Evidence
+
+- workflows.documentation-update-for-new-features
+- Example: docs: update README with new features
+
+---
+id: ripgrep-soft-instinct-project-cleanup
+trigger: "When cleaning up the repository by removing planning files, docs, or build artifacts"
+confidence: 0.9
+domain: workflow
+source: repo-analysis
+source_repo: hgxszhj-pixel/ripgrep-soft
+---
+
+# Ripgrep Soft Instinct Project Cleanup
+
+## Action
+
+Remove .planning/, docs/, target/ from git tracking, update .gitignore, and commit the cleanup
+
+## Evidence
+
+- workflows.project-cleanup-remove-planning-or-build-artifacts
+- Example: chore: remove .planning from git tracking
+
