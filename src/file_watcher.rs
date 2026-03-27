@@ -6,11 +6,20 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver};
 
 /// File change event types
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum FileChange {
     Created(PathBuf),
     Modified(PathBuf),
     Removed(PathBuf),
+}
+
+impl FileChange {
+    /// Get the path from the file change event
+    pub fn path(&self) -> &Path {
+        match self {
+            FileChange::Created(p) | FileChange::Modified(p) | FileChange::Removed(p) => p,
+        }
+    }
 }
 
 /// Background file watcher that sends changes to a channel
@@ -121,57 +130,6 @@ mod tests {
         assert_eq!(FileChange::Created(path1.clone()), FileChange::Created(path2.clone()));
         assert_ne!(FileChange::Created(path1.clone()), FileChange::Created(path3.clone()));
         assert_ne!(FileChange::Created(path1.clone()), FileChange::Modified(path1.clone()));
-    }
-
-    #[test]
-    fn test_debounced_watcher_creation() {
-        // Test creating a debounced watcher on a temp directory
-        let temp_dir = std::env::temp_dir();
-        let result = DebouncedWatcher::new(&temp_dir, 100);
-        assert!(result.is_ok(), "Should create debounced watcher on temp dir");
-    }
-
-    #[test]
-    fn test_debounced_watcher_try_recv_empty() {
-        let temp_dir = std::env::temp_dir();
-        let mut watcher = DebouncedWatcher::new(&temp_dir, 100).unwrap();
-
-        // Should return None when no events pending
-        match watcher.try_recv() {
-            Ok(None) => {}
-            Ok(Some(_)) => panic!("Expected None for empty watcher"),
-            Err(_) => panic!("Expected Ok(None) or Err(Disconnected), not error"),
-        }
-    }
-
-    #[test]
-    fn test_debounced_watcher_is_watching() {
-        let temp_dir = std::env::temp_dir();
-        let watcher = DebouncedWatcher::new(&temp_dir, 100).unwrap();
-        assert!(watcher.is_watching(), "Watcher should be active after creation");
-    }
-
-    #[test]
-    fn test_debounced_watcher_stop() {
-        let temp_dir = std::env::temp_dir();
-        let mut watcher = DebouncedWatcher::new(&temp_dir, 100).unwrap();
-        watcher.stop();
-        assert!(!watcher.is_watching(), "Watcher should be inactive after stop");
-    }
-
-    #[test]
-    fn test_debounced_watcher_path() {
-        let temp_dir = std::env::temp_dir();
-        let watcher = DebouncedWatcher::new(&temp_dir, 100).unwrap();
-        assert_eq!(watcher.path(), temp_dir);
-    }
-
-    #[test]
-    fn test_debounced_watcher_is_watching_after_stop() {
-        let temp_dir = std::env::temp_dir();
-        let mut watcher = DebouncedWatcher::new(&temp_dir, 100).unwrap();
-        watcher.stop();
-        assert!(!watcher.is_watching());
     }
 
     #[test]

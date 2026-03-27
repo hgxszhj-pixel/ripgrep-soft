@@ -60,24 +60,6 @@ pub enum Commands {
         #[arg(short, long)]
         rebuild: bool,
     },
-    /// Heartbeat: Fetch latest skills from GitHub and Reddit
-    Heartbeat {
-        /// Fetch from all sources
-        #[arg(long, short)]
-        fetch: bool,
-
-        /// Show current trends
-        #[arg(long, short)]
-        trends: bool,
-
-        /// Show latest insights
-        #[arg(long, short)]
-        insights: bool,
-
-        /// Show heartbeat status
-        #[arg(long, short)]
-        status: bool,
-    },
 }
 
 impl Cli {

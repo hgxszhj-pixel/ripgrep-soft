@@ -38,50 +38,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Commands::Index { path, rebuild } => {
                 cli_search::run_index(path, rebuild)?;
             }
-            Commands::Heartbeat {
-                fetch,
-                trends,
-                insights,
-                status,
-            } => {
-                use turbo_search::heartbeat::{config::FetcherConfig, scheduler::HeartbeatScheduler};
-                use tokio::runtime::Runtime;
-
-                let rt = Runtime::new()?;
-                rt.block_on(async {
-                    let mut scheduler = HeartbeatScheduler::new(FetcherConfig::default());
-
-                    if fetch {
-                        match scheduler.fetch_now().await {
-                            Ok(insights) => {
-                                println!("Fetched {} insights:", insights.len());
-                                for (i, insight) in insights.iter().take(10).enumerate() {
-                                    println!("{}. [{}] {}", i + 1, insight.source, insight.title);
-                                }
-                            }
-                            Err(e) => {
-                                eprintln!("Fetch failed: {e}");
-                            }
-                        }
-                    } else if trends {
-                        println!("Use --fetch to get trends first");
-                    } else if insights {
-                        println!("Use --fetch to get insights first");
-                    } else if status {
-                        let stats = scheduler.get_stats().await;
-                        println!("Heartbeat Status:");
-                        println!("  Total fetches: {}", stats.total_fetches);
-                        println!("  Successful: {}", stats.successful_fetches);
-                        println!("  Failed: {}", stats.failed_fetches);
-                    } else {
-                        println!("Heartbeat commands:");
-                        println!("  --fetch    Fetch latest skills");
-                        println!("  --trends   Show trends");
-                        println!("  --insights Show insights");
-                        println!("  --status   Show status");
-                    }
-                });
-            }
         }
     }
 
