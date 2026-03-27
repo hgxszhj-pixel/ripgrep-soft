@@ -5,9 +5,7 @@ use std::io::{Read, Write, BufReader, BufWriter};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use ahash::AHashMap;
-use rayon::prelude::*;
 use walkdir::WalkDir;
-use ignore::WalkBuilder;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
@@ -182,45 +180,6 @@ impl FileIndex {
     }
 
     /// Check if a Windows file should be skipped based on hidden/system attributes
-    /// Uses cached metadata from WalkDir when available
-    #[cfg(windows)]
-    #[inline]
-    fn should_skip_windows_file(entry: &walkdir::DirEntry, options: &IndexOptions) -> bool {
-        use std::os::windows::fs::MetadataExt;
-        // Skip hidden: FILE_ATTRIBUTE_HIDDEN = 0x2
-        // Skip system: FILE_ATTRIBUTE_SYSTEM = 0x4
-        if let Ok(meta) = entry.metadata() {
-            let attrs = meta.file_attributes();
-            if options.skip_hidden && (attrs & 0x2) != 0 {
-                return true;
-            }
-            if options.skip_system && (attrs & 0x4) != 0 {
-                return true;
-            }
-        }
-        false
-    }
-
-    /// Check if a Windows file should be skipped based on hidden/system attributes (jwalk version)
-    #[cfg(windows)]
-    #[inline]
-    fn should_skip_jwalk_file<C: jwalk::ClientState>(
-        entry: &jwalk::DirEntry<C>,
-        options: &IndexOptions,
-    ) -> bool {
-        use std::os::windows::fs::MetadataExt;
-        if let Ok(meta) = entry.metadata() {
-            let attrs = meta.file_attributes();
-            if options.skip_hidden && (attrs & 0x2) != 0 {
-                return true;
-            }
-            if options.skip_system && (attrs & 0x4) != 0 {
-                return true;
-            }
-        }
-        false
-    }
-
     /// Walk directory recursively using WalkDir for better performance
     /// Optimized: Single-pass traversal with cached metadata (no double I/O)
     fn walk_directory_recursive(&mut self, path: &Path) {
@@ -561,80 +520,6 @@ impl FileIndex {
         Ok(count)
     }
 
-    /// Walk directory with options and parallel processing
-    /// Optimized: Single-pass with efficient filtering
-    pub fn walk_directory_with_options(
-        &mut self,
-        path: &Path,
-        options: &IndexOptions,
-    ) -> std::io::Result<usize> {
-        if !path.exists() {
-            return Ok(0);
-        }
-
-        // Build WalkDir with options
-        let mut walker = WalkDir::new(path)
-            .min_depth(1)
-            .follow_links(false)
-            .same_file_system(true);
-
-        if let Some(max_depth) = options.max_depth {
-            walker = walker.max_depth(max_depth);
-        }
-
-        // Collect file entries using cached metadata
-        // Use a closure to avoid code duplication
-        #[cfg(windows)]
-        let entries: Vec<FileEntry> = walker
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                if e.file_type().is_dir() {
-                    return true;
-                }
-
-                // Skip hidden/system files using cached metadata if available
-                if (options.skip_hidden || options.skip_system)
-                    && Self::should_skip_windows_file(e, options)
-                {
-                    return false;
-                }
-
-                true
-            })
-            .filter(|e| e.file_type().is_file())
-            .filter_map(|e| FileEntry::from_walk_entry(&e))
-            .collect();
-
-        #[cfg(not(windows))]
-        let entries: Vec<FileEntry> = walker
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                if e.file_type().is_dir() {
-                    return true;
-                }
-
-                let file_name = e.file_name();
-                if options.skip_hidden && file_name.to_string_lossy().starts_with('.') {
-                    return false;
-                }
-
-                true
-            })
-            .filter(|e| e.file_type().is_file())
-            .filter_map(|e| FileEntry::from_walk_entry(&e))
-            .collect();
-
-        let count = entries.len();
-
-        // Pre-allocate capacity
-        self.entries.reserve(count);
-        self.entries.extend(entries);
-
-        Ok(count)
-    }
-
     /// Walk directory using jwalk for high-performance parallel traversal
     /// Optimized jwalk - fast parallel directory traversal
     /// Skip sorting for speed, skip hidden/system files
@@ -663,126 +548,6 @@ impl FileIndex {
         self.add_entries_batch(entries);
 
         Ok(count)
-    }
-
-    /// Walk directory using jwalk with custom filtering
-    /// Supports skip_hidden and skip_system options
-    #[cfg(windows)]
-    pub fn walk_directory_jwalk_with_options(
-        &mut self,
-        path: &Path,
-        options: &IndexOptions,
-        max_files: usize,
-    ) -> std::io::Result<usize> {
-        if !path.exists() {
-            return Ok(0);
-        }
-
-        // jwalk with sorting enabled, use cached metadata
-        let entries: Vec<FileEntry> = JwalkWalkDir::new(path)
-            .sort(true)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                if e.file_type().is_dir() {
-                    return true;
-                }
-
-                // Skip hidden/system files using helper method
-                if (options.skip_hidden || options.skip_system)
-                    && Self::should_skip_jwalk_file(e, options)
-                {
-                    return false;
-                }
-
-                true
-            })
-            .filter(|e| e.file_type().is_file())
-            .filter_map(|e| FileEntry::from_jwalk_entry(&e))
-            .take(max_files)
-            .collect();
-
-        let count = entries.len();
-
-        // Use batch add to incrementally update index
-        self.add_entries_batch(entries);
-
-        Ok(count)
-    }
-
-    /// Walk directory with .gitignore support using ignore crate
-    /// This respects .gitignore, .ignore, and other ignore files
-    pub fn walk_directory_with_ignore(&mut self, path: &Path, max_files: usize) -> std::io::Result<usize> {
-        if !path.exists() {
-            return Ok(0);
-        }
-
-        let capacity = max_files.min(1_000_000);
-        self.entries.reserve(capacity);
-
-        // Use ignore crate for gitignore-aware traversal
-        // This automatically respects .gitignore, .ignore, and parent directory ignore files
-        let walker = WalkBuilder::new(path)
-            .ignore(true)  // Look for .ignore files and respect gitignore
-            .build();
-
-        let file_paths: Vec<PathBuf> = walker
-            .filter_map(|e| e.ok())
-            .filter_map(|e| e.file_type()?.is_file().then(|| e.path().to_path_buf()))
-            .take(max_files)
-            .collect();
-
-        let count = file_paths.len();
-
-        // Use parallel processing for large file lists
-        let entries: Vec<FileEntry> = if count > 1000 {
-            file_paths
-                .par_iter()
-                .filter_map(|p| FileEntry::from_path(p))
-                .collect()
-        } else {
-            file_paths
-                .iter()
-                .filter_map(|p| FileEntry::from_path(p))
-                .collect()
-        };
-
-        self.entries.extend(entries);
-
-        Ok(count)
-    }
-}
-
-#[cfg(windows)]
-mod mft_integration {
-    use super::*;
-    use crate::mft_reader::MftReader;
-    use std::time::UNIX_EPOCH;
-
-    impl FileIndex {
-        /// Create index from NTFS MFT (Windows only)
-        pub fn from_mft(volume: &str) -> Result<Self, crate::mft_reader::MftError> {
-            let reader = MftReader::new(volume)?;
-            let mft_entries = reader.read_entries()?;
-
-            let mut index = FileIndex::new();
-
-            for mft_entry in mft_entries {
-                if !mft_entry.is_directory {
-                    let name_lower = mft_entry.name.to_lowercase();
-                    let entry = FileEntry {
-                        path: mft_entry.path,
-                        name: mft_entry.name,
-                        name_lower,
-                        size: mft_entry.size,
-                        modified: UNIX_EPOCH,
-                    };
-                    index.entries.push(entry);
-                }
-            }
-
-            Ok(index)
-        }
     }
 }
 
