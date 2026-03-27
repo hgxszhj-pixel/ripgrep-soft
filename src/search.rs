@@ -658,18 +658,6 @@ impl ContentSearcher {
 mod tests {
     use super::*;
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    // Track if cache has been cleared for tests
-    static TESTS_INITIALIZED: AtomicBool = AtomicBool::new(false);
-
-    // Initialize test environment - clear cache once at start
-    fn init_tests() {
-        if !TESTS_INITIALIZED.load(Ordering::SeqCst) {
-            invalidate_search_cache();
-            TESTS_INITIALIZED.store(true, Ordering::SeqCst);
-        }
-    }
 
     fn create_test_entry(name: &str) -> FileEntry {
         FileEntry {

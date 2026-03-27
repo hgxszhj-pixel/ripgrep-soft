@@ -147,7 +147,7 @@ mod tests {
     #[test]
     fn test_debounced_watcher_is_watching() {
         let temp_dir = std::env::temp_dir();
-        let mut watcher = DebouncedWatcher::new(&temp_dir, 100).unwrap();
+        let watcher = DebouncedWatcher::new(&temp_dir, 100).unwrap();
         assert!(watcher.is_watching(), "Watcher should be active after creation");
     }
 
