@@ -7,7 +7,6 @@ pub mod error;
 pub mod file_watcher;
 pub mod gui;
 pub mod history;
-pub mod incremental_index;
 pub mod index;
 pub mod logging;
 pub mod search;

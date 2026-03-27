@@ -561,31 +561,6 @@ impl FileIndex {
         Ok(count)
     }
 
-    /// Walk directory with parallel processing (unlimited)
-    /// Optimized: Single-pass traversal with cached metadata
-    pub fn walk_directory_parallel(&mut self, path: &Path) -> std::io::Result<usize> {
-        if !path.exists() {
-            return Ok(0);
-        }
-
-        // Single-pass: use WalkDir's cached metadata directly (no double I/O)
-        let entries: Vec<FileEntry> = WalkDir::new(path)
-            .min_depth(1)
-            .follow_links(false)
-            .same_file_system(true)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_file())
-            .filter_map(|e| FileEntry::from_walk_entry(&e))
-            .collect();
-
-        let count = entries.len();
-        self.entries.reserve(count);
-        self.entries.extend(entries);
-
-        Ok(count)
-    }
-
     /// Walk directory with options and parallel processing
     /// Optimized: Single-pass with efficient filtering
     pub fn walk_directory_with_options(
@@ -655,73 +630,6 @@ impl FileIndex {
 
         // Pre-allocate capacity
         self.entries.reserve(count);
-        self.entries.extend(entries);
-
-        Ok(count)
-    }
-
-    /// Walk directory with maximum performance for very large directories
-    /// Uses parallel directory scanning - each top-level subdirectory is processed in parallel
-    /// This is optimal for directories with many subdirectories (e.g., C:\Users)
-    pub fn walk_directory_parallel_high_performance(&mut self, path: &Path, max_files: usize) -> std::io::Result<usize> {
-        if !path.exists() {
-            return Ok(0);
-        }
-
-        // First, get list of top-level entries with cached metadata
-        let mut top_level_dirs: Vec<walkdir::DirEntry> = Vec::new();
-        let mut top_level_files: Vec<FileEntry> = Vec::new();
-
-        for entry in WalkDir::new(path)
-            .min_depth(1)
-            .max_depth(1)
-            .follow_links(false)
-            .into_iter()
-            .filter_map(|e| e.ok())
-        {
-            if entry.file_type().is_dir() {
-                top_level_dirs.push(entry);
-            } else if entry.file_type().is_file() {
-                if let Some(file_entry) = FileEntry::from_walk_entry(&entry) {
-                    top_level_files.push(file_entry);
-                }
-            }
-        }
-
-        // Add top-level files directly
-        self.entries.extend(top_level_files);
-
-        if top_level_dirs.is_empty() {
-            return Ok(self.entries.len());
-        }
-
-        // Pre-allocate based on estimate
-        self.entries.reserve(max_files.min(1_000_000));
-
-        // Process each top-level directory in parallel and collect entries directly
-        let remaining_slots = max_files.saturating_sub(self.entries.len());
-
-        // Collect entries from parallel directories using cached metadata
-        // First collect to Vec, then filter
-        let all_entries: Vec<FileEntry> = top_level_dirs
-            .par_iter()
-            .flat_map(|dir| {
-                WalkDir::new(dir.path())
-                    .min_depth(1)
-                    .follow_links(false)
-                    .same_file_system(true)
-                    .into_iter()
-                    .filter_map(|e| e.ok())
-                    .filter(|e| e.file_type().is_file())
-                    .filter_map(|e| FileEntry::from_walk_entry(&e))
-                    .collect::<Vec<_>>()
-            })
-            .collect();
-
-        // Take only what we need
-        let entries: Vec<FileEntry> = all_entries.into_iter().take(remaining_slots).collect();
-
-        let count = entries.len();
         self.entries.extend(entries);
 
         Ok(count)
